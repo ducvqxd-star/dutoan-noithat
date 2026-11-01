@@ -93,9 +93,11 @@ init_db()
 # -------------------------------------------------------------
 # 2. HÀM NẠP CSDL MASTER TỰ ĐỘNG NHẬN DIỆN MỌI ĐỊNH DẠNG FILE
 # -------------------------------------------------------------
+# -------------------------------------------------------------
+# 2. HÀM NẠP CSDL MASTER TỰ ĐỘNG KHỚP CỘT (Sheet DMVT / Cột O)
+# -------------------------------------------------------------
 @st.cache_data(ttl=600)
 def load_price_master():
-    # Danh sách các tên file ưu tiên kiểm tra
     candidate_files = [
         "BIEU-MAU-DU-TOAN_MAPPED_MASTER.xlsx",
         "BIEU-MAU-DU-TOAN_VERSION-2.xlsx",
@@ -110,22 +112,21 @@ def load_price_master():
             target_file = fname
             break
             
-    # Nếu không trùng tên danh sách trên, tự động quét bất kỳ file .xlsx nào có trong thư mục
     if not target_file:
         all_xlsx = [f for f in os.listdir(".") if f.endswith(".xlsx") and not f.startswith("~$")]
         if all_xlsx:
             target_file = all_xlsx[0]
         else:
-            return {}, "Không tìm thấy file Excel đơn giá nào"
+            return {}, "Không tìm thấy file Excel"
 
     try:
         xls = pd.ExcelFile(target_file)
         
-        # Tự động tìm sheet chứa dữ liệu đơn giá
+        # Nhận diện sheet: Ưu tiên DMVT hoặc ĐƠN GIÁ VT
         target_sheet = None
         for s in xls.sheet_names:
             s_clean = s.strip().lower()
-            if any(k in s_clean for k in ["đơn giá vt", "don gia vt", "dongia", "vt"]):
+            if any(k in s_clean for k in ["dmvt", "đơn giá vt", "don gia vt", "dongia", "vt"]):
                 target_sheet = s
                 break
         if not target_sheet:
@@ -133,36 +134,64 @@ def load_price_master():
 
         df_raw = pd.read_excel(target_file, sheet_name=target_sheet, header=None)
         
-        # Nhận diện cấu trúc file theo tên sheet
-        is_gia_cost = "dongia" in str(target_sheet).lower()
+        # Mặc định theo cấu trúc sheet DMVT (Cột O là Đơn giá)
+        # Cột B: Mã (index 1), Cột C: Tên (index 2), Cột D: ĐVT (index 3), Cột O: Đơn giá (index 14)
         col_code = 1
         col_name = 2
-        col_unit = 4
-        col_price = 7 if is_gia_cost else 5
-        start_row = 6 if is_gia_cost else 2
+        col_unit = 3   # Cột D (ĐVT)
+        col_price = 14 # Cột O (ĐƠN GIÁ)
+        start_row = 3  # Dữ liệu bắt đầu từ dòng 4 (index 3)
+
+        # Quét tìm dòng tiêu đề thực tế để định vị chính xác vị trí các cột
+        for r_idx in range(min(10, len(df_raw))):
+            row_vals = [str(x).strip().lower() for x in df_raw.iloc[r_idx] if pd.notna(x)]
+            if any("đơn giá" in v or "thành tiền" in v for v in row_vals):
+                for c_idx, val in enumerate(df_raw.iloc[r_idx]):
+                    val_str = str(val).strip().lower()
+                    if "mã" in val_str and "vật tư" in val_str:
+                        col_code = c_idx
+                    elif "tên vật tư" in val_str or "hạng mục" in val_str:
+                        col_name = c_idx
+                    elif val_str == "đvt" or "đơn vị" in val_str:
+                        col_unit = c_idx
+                    elif val_str == "đơn giá" or val_str == "đơn giá tính":
+                        col_price = c_idx
+                start_row = r_idx + 1
+                break
 
         price_dict = {}
         current_cat = "CHUNG"
 
         for r in range(start_row, len(df_raw)):
-            code = df_raw.iloc[r, col_code]
-            name = df_raw.iloc[r, col_name]
+            code = df_raw.iloc[r, col_code] if len(df_raw.columns) > col_code else None
+            name = df_raw.iloc[r, col_name] if len(df_raw.columns) > col_name else None
             unit = df_raw.iloc[r, col_unit] if len(df_raw.columns) > col_unit else 'cái'
             price = df_raw.iloc[r, col_price] if len(df_raw.columns) > col_price else 0
 
+            # Bỏ qua dòng tiêu đề phụ
+            if str(code).strip().lower() in ["mã vật tư", "code", "stt", "nan", ""]:
+                continue
+
             if pd.isna(code) and pd.notna(name):
                 current_cat = str(name).strip()
-            elif pd.notna(code) and pd.notna(name) and pd.notna(price):
+            elif pd.notna(code) and pd.notna(name):
                 try:
-                    p_val = float(price)
+                    # Chuyển đổi định dạng số (xử lý cả dạng chuỗi có dấu phẩy ngăn cách)
+                    if isinstance(price, (int, float)):
+                        p_val = float(price)
+                    else:
+                        p_val = float(str(price).replace(",", "").replace(".", "").strip())
                 except Exception:
                     p_val = 0.0
-                price_dict[str(code).strip()] = {
-                    "category": current_cat,
-                    "name": str(name).strip().replace('\n', ' '),
-                    "unit": str(unit).strip() if pd.notna(unit) else 'cái',
-                    "unit_cost": p_val
-                }
+                
+                # Chỉ nhận các mã có giá trị hợp lệ
+                if p_val > 0:
+                    price_dict[str(code).strip()] = {
+                        "category": current_cat,
+                        "name": str(name).strip().replace('\n', ' '),
+                        "unit": str(unit).strip() if pd.notna(unit) else 'cái',
+                        "unit_cost": p_val
+                    }
         return price_dict, f"{target_file} (Sheet: {target_sheet})"
     except Exception as e:
         return {}, f"Lỗi đọc file: {str(e)}"

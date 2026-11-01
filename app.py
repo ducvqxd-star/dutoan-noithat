@@ -8,13 +8,13 @@ import sqlite3
 import hashlib
 from datetime import datetime, timezone, timedelta
 from PIL import Image
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Optional
 from google import genai
 from google.genai import types
 
 # -------------------------------------------------------------
-# 1. CẤU HÌNH GIAO DIỆN & TỰ ĐỘNG LẤY API KEY TỪ CLOUD SECRETS
+# 1. CẤU HÌNH GIAO DIỆN & TĂNG ĐỘ TƯƠNG PHẢN (CHỐNG MỜ CHỮ)
 # -------------------------------------------------------------
 st.set_page_config(
     page_title="Hệ Thống Dự Toán Nội Thất (AI QS)", 
@@ -22,11 +22,28 @@ st.set_page_config(
     layout="wide"
 )
 
+# Chống mờ chữ trên màn hình sáng/tối
+st.markdown("""
+<style>
+    div[data-testid="stDataFrame"] {
+        opacity: 1 !important;
+        filter: none !important;
+    }
+    .stDataFrame td, .stDataFrame th {
+        font-weight: 500 !important;
+        font-size: 14px !important;
+    }
+    .stApp {
+        opacity: 1 !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 DB_FILE = "qs_multiuser.db"
 IMAGE_DIR = "uploaded_drawings"
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
-# Lấy API Key từ Secrets của Streamlit Cloud an toàn
+# Lấy API Key từ Secrets của Streamlit Cloud (bảo vệ tránh crash khi chạy local)
 try:
     CLOUD_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 except Exception:
@@ -71,7 +88,6 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     ''')
-    # Tự động cập nhật cột mới nếu bảng đã tạo từ trước
     try:
         c.execute("ALTER TABLE projects ADD COLUMN review_status TEXT DEFAULT 'Chờ duyệt'")
     except Exception:
@@ -149,8 +165,8 @@ def load_price_master():
         
         col_code = 1
         col_name = 2
-        col_unit = 3
-        col_price = 14 # Cột O trong Excel
+        col_unit = 3   # Cột D (ĐVT)
+        col_price = 14 # Cột O (Đơn giá tính)
         start_row = 3
 
         for r_idx in range(min(12, len(df_raw))):
@@ -352,12 +368,13 @@ with tab1:
                         2. TUÂN THỦ NGHIÊM NGẶT SPECS:
                            - Chỉ bóc tách những gì thực sự có trong bản vẽ và được nêu trong phần quy cách.
                         3. HỆ SỐ HAO HỤT (waste_factor_percent) CỐ ĐỊNH:
-                           - Ván công nghiệp (MDF, MFC, Plywood): cố định đúng 8.0%
+                           - Ván công nghiệp (MDF, MFC, Plywood, Gỗ ghép): cố định đúng 8.0%
                            - Đá tự nhiên / Đá nung kết: cố định đúng 10.0%
                            - Nẹp / Inox / Phụ kiện: cố định đúng 5.0%
-                        4. ÁNH XẠ MÃ VẬT TƯ (material_master_code): Khớp chính xác mã trong CSDL.
+                        4. ÁNH XẠ MÃ VẬT TƯ (material_master_code): Khớp mã trong CSDL nếu có, hoặc ghi rõ tên chủng loại chính xác.
                         """
 
+                        # Áp dụng danh sách model chỉ định: gemini-3.8-flash, gemini-3.1-pro
                         MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-3.1-pro']
                         response = None
                         last_err = None
@@ -369,18 +386,17 @@ with tab1:
                                         model=current_model,
                                         contents=[*images, prompt],
                                         config=types.GenerateContentConfig(
-                                            system_instruction="BẠN LÀ CHUYÊN GIA SENIOR QS NỘI THẤT. Tính toán khối lượng tất định, không suy diễn ngẫu nhiên, mapping mã chuẩn xác.",
+                                            system_instruction="BẠN LÀ CHUYÊN GIA SENIOR QS NỘI THẤT. Tính toán khối lượng tất định, không suy diễn ngẫu nhiên, mô tả chi tiết vật tư.",
                                             response_mime_type="application/json",
                                             response_schema=TakeoffResult,
-                                            temperature=0.0,
-                                            thinking_config=types.ThinkingConfig(thinking_budget=0) if "2.5" in current_model else None
+                                            temperature=0.0
                                         )
                                     )
                                     break
                                 except Exception as err:
                                     last_err = err
                                     err_str = str(err)
-                                    if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
+                                    if any(k in err_str for k in ["503", "UNAVAILABLE", "429"]):
                                         time.sleep(2 * (attempt + 1))
                                     else:
                                         break
@@ -392,17 +408,41 @@ with tab1:
 
                         data = json.loads(response.text)
                         
+                        # Khớp đơn giá từ Master Database với thuật toán tìm kiếm thông minh
                         total_direct = 0
                         boq_records = []
                         for sub in data.get("structural_breakdown", []):
                             m_name = sub.get("sub_assembly_name")
                             for comp in sub.get("components", []):
-                                code = str(comp.get("material_master_code", "DEFAULT")).strip()
-                                item_info = PRICE_MASTER.get(code, {
-                                    "name": comp.get("description"), 
-                                    "unit": comp.get("unit"), 
-                                    "unit_cost": 250000.0
-                                })
+                                code = str(comp.get("material_master_code", "")).strip()
+                                desc = comp.get("description", "").lower().strip()
+                                
+                                # 1. Khớp chính xác theo mã code
+                                item_info = PRICE_MASTER.get(code)
+                                
+                                # 2. Nếu không khớp mã code, tự động tìm kiếm tương đối theo từ khóa tên vật tư
+                                if not item_info and desc:
+                                    best_match = None
+                                    best_score = 0
+                                    clean_words = [w for w in desc.replace(",", " ").replace("-", " ").replace("/", " ").split() if len(w) > 2]
+                                    for p_code, p_data in PRICE_MASTER.items():
+                                        p_name_lower = p_data["name"].lower()
+                                        score = sum(1 for w in clean_words if w in p_name_lower)
+                                        if score > best_score:
+                                            best_score = score
+                                            best_match = p_data
+                                            code = p_code
+                                    if best_score >= 1:
+                                        item_info = best_match
+
+                                # 3. Nếu không tìm thấy trong Master, không gán 250k mà để 0 để cảnh báo
+                                if not item_info:
+                                    item_info = {
+                                        "name": comp.get("description"),
+                                        "unit": comp.get("unit"),
+                                        "unit_cost": 0.0
+                                    }
+
                                 u_cost = item_info["unit_cost"]
                                 gross_q = comp.get("gross_quantity", 0.0)
                                 amt = gross_q * u_cost
@@ -410,7 +450,7 @@ with tab1:
                                 
                                 boq_records.append({
                                     "module_name": m_name,
-                                    "material_code": code,
+                                    "material_code": code if code else "CHƯA_CÓ_MÃ",
                                     "description": comp.get("description"),
                                     "technical_spec": comp.get("technical_spec"),
                                     "unit": item_info.get("unit", comp.get("unit")),
@@ -489,7 +529,6 @@ with tab2:
     st.subheader(f"📂 Thư Viện Hồ Sơ Dự Toán")
     conn = sqlite3.connect(DB_FILE)
     
-    # Lấy thông tin kèm tên người tạo (JOIN bảng users)
     query = """
         SELECT 
             p.id, 
@@ -518,7 +557,6 @@ with tab2:
     if df_saved.empty:
         st.info("Chưa có hồ sơ dự toán nào được lưu.")
     else:
-        # Đổi tên cột hiển thị thân thiện
         df_display = df_saved.rename(columns={
             "id": "ID",
             "nguoi_tao": "Người tạo",
@@ -545,7 +583,6 @@ with tab2:
         
         col_act1, col_act2 = st.columns([1, 1])
         
-        # Cột 1: Tải chi tiết BOQ
         with col_act1:
             st.markdown("### 📥 Chi tiết BOQ & Xuất Excel")
             sel_id = st.selectbox("Chọn ID hồ sơ:", df_saved["id"].tolist())
@@ -570,13 +607,12 @@ with tab2:
                     use_container_width=True
                 )
 
-        # Cột 2: Đánh giá giá & Xóa hồ sơ
         with col_act2:
             st.markdown("### 🛡️ Thao tác Hồ sơ & Kiểm duyệt")
             selected_row = df_saved[df_saved["id"] == sel_id].iloc[0]
             st.info(f"Đang chọn: **#{sel_id} - {selected_row['item_name']}** (Người tạo: {selected_row['nguoi_tao']})")
             
-            # Chỉ Admin mới có quyền Đánh giá Đúng/Sai giá
+            # Quản trị viên đánh giá Đúng/Sai giá
             if user['role'] == 'admin':
                 st.markdown("#### 1. Đánh giá tính chính xác của Đơn giá:")
                 cur_status = selected_row['review_status'] if pd.notna(selected_row['review_status']) else 'Chờ duyệt'

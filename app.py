@@ -348,7 +348,7 @@ with tab1:
                         """
 
                         response = client.models.generate_content(
-                            model='gemini-2.5-flash',
+                            model='gemini-3.8-flash',
                             contents=[*images, prompt],
                             config=types.GenerateContentConfig(
                                 system_instruction="BẠN LÀ SENIOR QS NỘI THẤT. Bóc tách khối lượng net, tỷ lệ hao hụt waste%, mapping material_master_code phân tầng chuẩn xác.",

@@ -14,7 +14,7 @@ from google import genai
 from google.genai import types
 
 # -------------------------------------------------------------
-# 1. CẤU HÌNH GIAO DIỆN & TĂNG ĐỘ TƯƠNG PHẢN (CHỐNG MỜ CHỮ)
+# 1. CẤU HÌNH GIAO DIỆN & TĂNG TƯƠNG PHẢN (CHỐNG MỜ CHỮ)
 # -------------------------------------------------------------
 st.set_page_config(
     page_title="Hệ Thống Dự Toán Nội Thất (AI QS)", 
@@ -22,7 +22,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Chống mờ chữ trên màn hình sáng/tối
+# Khắc phục triệt để hiện tượng chữ và bảng bị mờ trên Streamlit
 st.markdown("""
 <style>
     div[data-testid="stDataFrame"] {
@@ -43,7 +43,7 @@ DB_FILE = "qs_multiuser.db"
 IMAGE_DIR = "uploaded_drawings"
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
-# Lấy API Key từ Secrets của Streamlit Cloud (bảo vệ tránh crash khi chạy local)
+# Lấy API Key từ Secrets của Streamlit Cloud (tránh crash khi chạy trên máy cá nhân)
 try:
     CLOUD_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 except Exception:
@@ -88,6 +88,7 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     ''')
+    # Tự động cập nhật cột nếu bảng đã tồn tại từ phiên bản cũ
     try:
         c.execute("ALTER TABLE projects ADD COLUMN review_status TEXT DEFAULT 'Chờ duyệt'")
     except Exception:
@@ -163,12 +164,14 @@ def load_price_master():
 
         df_raw = pd.read_excel(target_file, sheet_name=target_sheet, header=None)
         
+        # Mặc định cấu trúc bảng: Cột B (Mã: 1), C (Tên: 2), D (ĐVT: 3), O (Đơn giá tính: 14)
         col_code = 1
         col_name = 2
-        col_unit = 3   # Cột D (ĐVT)
-        col_price = 14 # Cột O (Đơn giá tính)
+        col_unit = 3
+        col_price = 14
         start_row = 3
 
+        # Quét tìm dòng tiêu đề thực tế nếu cấu trúc có xê dịch
         for r_idx in range(min(12, len(df_raw))):
             row_vals = [str(x).strip().lower() for x in df_raw.iloc[r_idx] if pd.notna(x)]
             if any("đơn giá" in v or "thành tiền" in v for v in row_vals):
@@ -328,7 +331,7 @@ with tab1:
         specs = st.text_area(
             "Quy cách kỹ thuật & Vật liệu chỉ định:",
             height=130, 
-            value="- Hệ vách tivi: Khung xương gỗ ghép thanh kết hợp cốt MDF chống ẩm phủ Melamine.\n- Tủ áo: Thùng cánh MDF chống ẩm, bản lề giảm chấn, ray trượt âm.\n- Kích thước gia công và phụ kiện theo đúng bản vẽ đính kèm."
+            value="- Hệ vách tivi: Khung xương gỗ ghép thanh kết hợp cốt MDF chống ẩm phủ Melamine.\n- Tủ áo: Thùng cánh MDF chống ẩm phủ Melamine, bản lề giảm chấn, ray trượt âm.\n- Phụ kiện & liên kết đồng bộ theo thiết kế."
         )
 
         submit_btn = st.button("🚀 Bắt đầu bóc tách & Tính dự toán", type="primary", use_container_width=True)
@@ -354,27 +357,42 @@ with tab1:
                             img.save(spath)
                             saved_paths.append(spath)
 
+                        # PROMPT ĐÃ ĐƯỢC CHUẨN HÓA KHUNG 4 MODULE CỐ ĐỊNH CHỐNG LỆCH KẾT QUẢ
                         prompt = f"""
-                        BÓC TÁCH KỸ THUẬT NỘI THẤT (ĐỘ CHÍNH XÁC CAO - QUY TẮC BẮT BUỘC):
-                        - Hạng mục: {item_name} | Mã hiệu: {item_code}
-                        - Kích thước phủ bì cố định: {dimensions}
+                        BẠN LÀ SENIOR QS NỘI THẤT. BÓC TÁCH KHỐI LƯỢNG KỸ THUẬT THEO KHUÔN MẪU BẮT BUỘC:
+                        - Hạng mục: {item_name} (Mã hiệu: {item_code})
+                        - Kích thước phủ bì cố định: {dimensions} (Dài x Rộng x Cao tính bằng mm)
                         - Quy cách vật liệu thực tế:
                         {specs}
 
-                        QUY TẮC HÌNH HỌC & ĐỊNH MỨC BẮT BUỘC:
-                        1. TÍNH TOÁN THEO KÍCH THƯỚC PHỦ BÌ:
-                           - Tổng diện tích mặt đứng không được vượt quá: (Dài x Cao) / 1.000.000 (m2).
-                           - Bóc tách đúng các module: thùng, hậu, vách, cánh, đợt, phụ kiện.
-                        2. TUÂN THỦ NGHIÊM NGẶT SPECS:
-                           - Chỉ bóc tách những gì thực sự có trong bản vẽ và được nêu trong phần quy cách.
-                        3. HỆ SỐ HAO HỤT (waste_factor_percent) CỐ ĐỊNH:
-                           - Ván công nghiệp (MDF, MFC, Plywood, Gỗ ghép): cố định đúng 8.0%
-                           - Đá tự nhiên / Đá nung kết: cố định đúng 10.0%
-                           - Nẹp / Inox / Phụ kiện: cố định đúng 5.0%
-                        4. ÁNH XẠ MÃ VẬT TƯ (material_master_code): Khớp mã trong CSDL nếu có, hoặc ghi rõ tên chủng loại chính xác.
+                        QUY TẮC PHÂN RÃ CẤU KIỆN (BẮT BUỘC CHIA THÀNH 4 MODULE CHUẨN DƯỚI ĐÂY):
+
+                        1. MODULE 1 - THÙNG & KHUNG XƯƠNG:
+                           - Thùng tủ, vách ngăn, đợt: Bóc theo m2 ván MDF/MFC chống ẩm. Công thức ước tính chuẩn xưởng: (Dài x Cao x 2.2) / 1.000.000 (m2).
+                           - Hậu tủ chống ẩm (ván 9mm): (Dài x Cao) / 1.000.000 (m2).
+                           - Hệ khung xương/khung gia cố: Tính theo m2 hoặc m dài thực tế.
+
+                        2. MODULE 2 - CÁNH TỦ & MẶT TIỀN:
+                           - Cánh tủ / Mặt ngăn kéo: Bóc theo diện tích m2 mặt đứng bao phủ thực tế.
+
+                        3. MODULE 3 - VẬT LIỆU HOÀN THIỆN ĐẶC BIỆT (CHỈ BÓC NẾU CÓ TRONG BẢN VẼ HOẶC SPECS):
+                           - Mặt đá bàn/vách đá: Tính theo m2 hoặc m dài thực tế.
+                           - Màng xuyên sáng / Gương kính / Vách nệm da: Bóc theo m2 thực tế.
+                           - Nẹp viền / Inox La PVD: Bóc theo mét dài (md).
+
+                        4. MODULE 4 - PHỤ KIỆN KIM KHÍ & NHÂN CÔNG:
+                           - Bản lề giảm chấn: Tính theo cái (bình quân 2 - 4 cái/cánh).
+                           - Ray trượt ngăn kéo: Tính theo bộ (1 bộ/ngăn kéo).
+                           - Đèn LED thanh nhôm định hình: Tính theo mét dài (md).
+                           - Nhân công lắp đặt hoàn thiện: Tính theo mét dài (md) hoặc m2 của sản phẩm.
+
+                        HỆ SỐ HAO HỤT CỐ ĐỊNH:
+                        - Ván gỗ công nghiệp / Gỗ ghép: đúng 8.0%
+                        - Đá nung kết / Đá tự nhiên: đúng 10.0%
+                        - Phụ kiện kim khí / Nẹp Inox: đúng 5.0%
                         """
 
-                        # Áp dụng danh sách model chỉ định: gemini-3.8-flash, gemini-3.1-pro
+                        # Luôn áp dụng danh sách model chỉ định: gemini-3.8-flash, gemini-3.1-pro
                         MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-3.1-pro']
                         response = None
                         last_err = None
@@ -386,7 +404,7 @@ with tab1:
                                         model=current_model,
                                         contents=[*images, prompt],
                                         config=types.GenerateContentConfig(
-                                            system_instruction="BẠN LÀ CHUYÊN GIA SENIOR QS NỘI THẤT. Tính toán khối lượng tất định, không suy diễn ngẫu nhiên, mô tả chi tiết vật tư.",
+                                            system_instruction="BẠN LÀ CHUYÊN GIA SENIOR QS NỘI THẤT. Tính toán khối lượng tất định, không suy diễn ngẫu nhiên, tuân thủ đúng 4 module chuẩn.",
                                             response_mime_type="application/json",
                                             response_schema=TakeoffResult,
                                             temperature=0.0
@@ -408,7 +426,7 @@ with tab1:
 
                         data = json.loads(response.text)
                         
-                        # Khớp đơn giá từ Master Database với thuật toán tìm kiếm thông minh
+                        # Khớp đơn giá từ Master Database với thuật toán Fuzzy Search thông minh
                         total_direct = 0
                         boq_records = []
                         for sub in data.get("structural_breakdown", []):
@@ -420,7 +438,7 @@ with tab1:
                                 # 1. Khớp chính xác theo mã code
                                 item_info = PRICE_MASTER.get(code)
                                 
-                                # 2. Nếu không khớp mã code, tự động tìm kiếm tương đối theo từ khóa tên vật tư
+                                # 2. Nếu không khớp mã code, tự động tìm tương đối theo từ khóa tên vật tư
                                 if not item_info and desc:
                                     best_match = None
                                     best_score = 0
@@ -435,7 +453,7 @@ with tab1:
                                     if best_score >= 1:
                                         item_info = best_match
 
-                                # 3. Nếu không tìm thấy trong Master, không gán 250k mà để 0 để cảnh báo
+                                # 3. Nếu không tìm thấy, để giá 0 để cảnh báo kiểm tra lại
                                 if not item_info:
                                     item_info = {
                                         "name": comp.get("description"),
@@ -465,7 +483,7 @@ with tab1:
                         tender_amt = (total_direct + overhead_amt) * (1 + profit_rate / 100.0)
                         created_time_vn = get_vietnam_time()
 
-                        # Lưu vào CSDL
+                        # Lưu vào CSDL nội bộ
                         conn = sqlite3.connect(DB_FILE)
                         cur = conn.cursor()
                         cur.execute('''
@@ -603,7 +621,7 @@ with tab2:
                 st.download_button(
                     f"📥 Tải file Excel của hồ sơ #{sel_id}", 
                     data=buf_re.getvalue(), 
-                    file_name=f"BOQ_ID_{sel_id}.xlsx",
+                    file_name=f"BOQ_ID_{sel_id}.xlsx", 
                     use_container_width=True
                 )
 

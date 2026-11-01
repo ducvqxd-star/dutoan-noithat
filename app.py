@@ -344,7 +344,7 @@ with tab1:
                         """
 
                         # Cơ chế Retry & Fallback xử lý lỗi 503 / 429
-                        MODELS_TO_TRY = ['gemini-2.5-flash', 'gemini-1.5-flash']
+                        MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-3.1-pro']
                         response = None
                         last_err = None
 

@@ -6,7 +6,7 @@ import os
 import time
 import sqlite3
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from PIL import Image
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -26,15 +26,21 @@ DB_FILE = "qs_multiuser.db"
 IMAGE_DIR = "uploaded_drawings"
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
-# Lấy API Key từ Secrets của Streamlit Cloud (bảo vệ tránh crash khi chạy local)
+# Lấy API Key từ Secrets của Streamlit Cloud an toàn
 try:
     CLOUD_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 except Exception:
     CLOUD_API_KEY = ""
 
+def get_vietnam_time():
+    """Lấy thời gian chuẩn theo múi giờ Việt Nam (GMT+7)"""
+    tz_vn = timezone(timedelta(hours=7))
+    return datetime.now(tz_vn).strftime("%Y-%m-%d %H:%M:%S")
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+    # Bảng người dùng
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,6 +50,7 @@ def init_db():
             role TEXT
         )
     ''')
+    # Bảng lưu hồ sơ dự toán
     c.execute('''
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,9 +66,22 @@ def init_db():
             technical_risks TEXT,
             image_paths TEXT,
             created_at TIMESTAMP,
+            review_status TEXT DEFAULT 'Chờ duyệt',
+            review_note TEXT DEFAULT '',
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     ''')
+    # Tự động cập nhật cột mới nếu bảng đã tạo từ trước
+    try:
+        c.execute("ALTER TABLE projects ADD COLUMN review_status TEXT DEFAULT 'Chờ duyệt'")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE projects ADD COLUMN review_note TEXT DEFAULT ''")
+    except Exception:
+        pass
+
+    # Bảng lưu chi tiết từng dòng BOQ
     c.execute('''
         CREATE TABLE IF NOT EXISTS boq_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,7 +98,7 @@ def init_db():
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         )
     ''')
-    # Tài khoản mặc định: admin / admin123 và qs01 / qs123
+    
     admin_pw = hashlib.sha256("admin123".encode()).hexdigest()
     qs1_pw = hashlib.sha256("qs123".encode()).hexdigest()
     c.execute("INSERT OR IGNORE INTO users (username, password_hash, full_name, role) VALUES ('admin', ?, 'Quản Trị Viên', 'admin')", (admin_pw,))
@@ -127,14 +147,12 @@ def load_price_master():
 
         df_raw = pd.read_excel(target_file, sheet_name=target_sheet, header=None)
         
-        # Mặc định cấu trúc bảng: Cột B (Mã: 1), C (Tên: 2), D (ĐVT: 3), O (Đơn giá: 14)
         col_code = 1
         col_name = 2
         col_unit = 3
-        col_price = 14
+        col_price = 14 # Cột O trong Excel
         start_row = 3
 
-        # Quét tìm dòng tiêu đề thực tế nếu cấu trúc có xê dịch
         for r_idx in range(min(12, len(df_raw))):
             row_vals = [str(x).strip().lower() for x in df_raw.iloc[r_idx] if pd.notna(x)]
             if any("đơn giá" in v or "thành tiền" in v for v in row_vals):
@@ -160,7 +178,6 @@ def load_price_master():
             unit = df_raw.iloc[r, col_unit] if len(df_raw.columns) > col_unit else 'cái'
             price = df_raw.iloc[r, col_price] if len(df_raw.columns) > col_price else 0
 
-            # Bỏ qua dòng tiêu đề phụ
             if str(code).strip().lower() in ["mã vật tư", "code", "stt", "nan", ""]:
                 continue
 
@@ -175,7 +192,6 @@ def load_price_master():
                 except Exception:
                     p_val = 0.0
                 
-                # Chỉ lấy các mã có giá trị hợp lệ (> 0)
                 if p_val > 0:
                     price_dict[str(code).strip()] = {
                         "category": current_cat,
@@ -190,7 +206,7 @@ def load_price_master():
 PRICE_MASTER, SOURCE_INFO = load_price_master()
 
 # -------------------------------------------------------------
-# 3. QUẢN LÝ PHIÊN ĐĂNG NHẬP (MULTI-USER)
+# 3. QUẢN LÝ ĐĂNG NHẬP (MULTI-USER)
 # -------------------------------------------------------------
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
@@ -276,14 +292,14 @@ with st.sidebar:
 
 tab1, tab2, tab3 = st.tabs(["📝 Bóc Tách Dự Toán Mới", "📂 Thư Viện Hồ Sơ Đã Lưu", "📊 Bảng Tra Đơn Giá Master"])
 
-# TAB 1: BÓC TÁCH KHỐI LƯỢNG
+# TAB 1: BÓC TÁCH MỚI
 with tab1:
     c1, c2 = st.columns([1, 1])
     with c1:
         st.subheader("1. Dữ liệu bản vẽ & Thông số kỹ thuật")
         project_name = st.text_input("Tên dự án / Công trình:", value="Biệt thự Park City")
         item_code = st.text_input("Mã sản phẩm / Hạng mục:", value="TR-01")
-        item_name = st.text_input("Tên sản phẩm:", value="Tủ rượu quầy bar kết hợp vách xuyên sáng")
+        item_name = st.text_input("Tên sản phẩm:", value="Vách Tivi + tủ quần áo p ngủ bà")
         dimensions = st.text_input("Kích thước bao (DxRxC mm):", value="4095 x 450 x 2600 mm")
         
         uploaded_files = st.file_uploader("Upload ảnh 3D hoặc bản vẽ kỹ thuật:", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
@@ -296,7 +312,7 @@ with tab1:
         specs = st.text_area(
             "Quy cách kỹ thuật & Vật liệu chỉ định:",
             height=130, 
-            value="- Kệ treo: Thanh Inox La 5x15mm mạ màu PVD, đợt gỗ sơn hoàn thiện rãnh LED.\n- Tủ dưới: Thùng cánh MDF chống ẩm phủ Melamine An Cường.\n- Tủ đứng: Cánh kính khung nhôm Slim, bản lề trục xoay âm nóc-đáy, đợt đỡ chai rượu nghiêng.\n- Mặt bàn bar: Đá nung kết Neolith líp mòi 45 độ, lót đệm ván Plywood.\n- Vách màng căng vi sinh xuyên sáng kèm hệ LED ziczac hộp đèn."
+            value="- Hệ vách tivi: Khung xương gỗ ghép thanh kết hợp cốt MDF chống ẩm phủ Melamine.\n- Tủ áo: Thùng cánh MDF chống ẩm, bản lề giảm chấn, ray trượt âm.\n- Kích thước gia công và phụ kiện theo đúng bản vẽ đính kèm."
         )
 
         submit_btn = st.button("🚀 Bắt đầu bóc tách & Tính dự toán", type="primary", use_container_width=True)
@@ -332,18 +348,16 @@ with tab1:
                         QUY TẮC HÌNH HỌC & ĐỊNH MỨC BẮT BUỘC:
                         1. TÍNH TOÁN THEO KÍCH THƯỚC PHỦ BÌ:
                            - Tổng diện tích mặt đứng không được vượt quá: (Dài x Cao) / 1.000.000 (m2).
-                           - Bóc tách đúng các module: thùng, hậu, vách, cánh, mặt đá, nẹp viền.
+                           - Bóc tách đúng các module: thùng, hậu, vách, cánh, đợt, phụ kiện.
                         2. TUÂN THỦ NGHIÊM NGẶT SPECS:
-                           - Chỉ bóc tách những gì thực sự có trong bản vẽ và được nêu trong phần quy cách. Tuyệt đối không tự ý thêm hạng mục ngoài lề.
+                           - Chỉ bóc tách những gì thực sự có trong bản vẽ và được nêu trong phần quy cách.
                         3. HỆ SỐ HAO HỤT (waste_factor_percent) CỐ ĐỊNH:
                            - Ván công nghiệp (MDF, MFC, Plywood): cố định đúng 8.0%
                            - Đá tự nhiên / Đá nung kết: cố định đúng 10.0%
-                           - Thanh Inox La / Nhôm Slim / Phụ kiện: cố định đúng 5.0%
-                           - Màng căng xuyên sáng: cố định đúng 10.0%
-                        4. ÁNH XẠ MÃ VẬT TƯ (material_master_code): Phải khớp chính xác với hệ mã Master trong CSDL.
+                           - Nẹp / Inox / Phụ kiện: cố định đúng 5.0%
+                        4. ÁNH XẠ MÃ VẬT TƯ (material_master_code): Khớp chính xác mã trong CSDL.
                         """
 
-                        # Cơ chế Retry & Fallback xử lý lỗi 503 / 429
                         MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-3.1-pro']
                         response = None
                         last_err = None
@@ -355,7 +369,7 @@ with tab1:
                                         model=current_model,
                                         contents=[*images, prompt],
                                         config=types.GenerateContentConfig(
-                                            system_instruction="BẠN LÀ CHUYÊN GIA SENIOR QS NỘI THẤT. Tính toán khối lượng tất định, không suy diễn ngẫu nhiên, mapping mã vật tư chuẩn xác.",
+                                            system_instruction="BẠN LÀ CHUYÊN GIA SENIOR QS NỘI THẤT. Tính toán khối lượng tất định, không suy diễn ngẫu nhiên, mapping mã chuẩn xác.",
                                             response_mime_type="application/json",
                                             response_schema=TakeoffResult,
                                             temperature=0.0,
@@ -378,7 +392,6 @@ with tab1:
 
                         data = json.loads(response.text)
                         
-                        # Khớp đơn giá từ Master Database
                         total_direct = 0
                         boq_records = []
                         for sub in data.get("structural_breakdown", []):
@@ -410,19 +423,20 @@ with tab1:
 
                         overhead_amt = total_direct * (overhead_rate / 100.0)
                         tender_amt = (total_direct + overhead_amt) * (1 + profit_rate / 100.0)
+                        created_time_vn = get_vietnam_time()
 
-                        # Lưu vào CSDL nội bộ
+                        # Lưu vào CSDL
                         conn = sqlite3.connect(DB_FILE)
                         cur = conn.cursor()
                         cur.execute('''
                             INSERT INTO projects 
-                            (user_id, project_name, item_code, item_name, dimensions, specs, direct_cost, overhead_cost, tender_price, technical_risks, image_paths, created_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            (user_id, project_name, item_code, item_name, dimensions, specs, direct_cost, overhead_cost, tender_price, technical_risks, image_paths, created_at, review_status, review_note)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Chờ duyệt', '')
                         ''', (
                             user["id"], project_name, item_code, item_name, dimensions, specs,
                             total_direct, overhead_amt, tender_amt,
                             json.dumps(data.get("technical_risks_and_notes", []), ensure_ascii=False),
-                            json.dumps(saved_paths), datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            json.dumps(saved_paths), created_time_vn
                         ))
                         proj_id = cur.lastrowid
                         
@@ -438,7 +452,7 @@ with tab1:
                         conn.commit()
                         conn.close()
 
-                        st.success(f"✅ Đã bóc tách thành công và lưu vào tài khoản {user['full_name']}!")
+                        st.success(f"✅ Bóc tách thành công lúc {created_time_vn} (Giờ VN)!")
                         
                         m1, m2, m3 = st.columns(3)
                         m1.metric("Chi phí trực tiếp (Direct Cost)", f"{total_direct:,.0f} đ")
@@ -470,43 +484,135 @@ with tab1:
                     except Exception as e:
                         st.error(f"Lỗi xử lý: {str(e)}")
 
-# TAB 2: THƯ VIỆN HỒ SƠ ĐÃ LƯU
+# TAB 2: THƯ VIỆN HỒ SƠ ĐÃ LƯU & QUẢN TRỊ KIỂM DUYỆT / XÓA
 with tab2:
-    st.subheader(f"📂 Hồ sơ dự toán của: {user['full_name']}")
+    st.subheader(f"📂 Thư Viện Hồ Sơ Dự Toán")
     conn = sqlite3.connect(DB_FILE)
-    query = "SELECT id, project_name, item_code, item_name, dimensions, direct_cost, tender_price, created_at FROM projects"
+    
+    # Lấy thông tin kèm tên người tạo (JOIN bảng users)
+    query = """
+        SELECT 
+            p.id, 
+            u.full_name AS nguoi_tao,
+            p.project_name, 
+            p.item_code, 
+            p.item_name, 
+            p.dimensions, 
+            p.direct_cost, 
+            p.tender_price, 
+            p.review_status,
+            p.review_note,
+            p.created_at,
+            p.user_id
+        FROM projects p
+        LEFT JOIN users u ON p.user_id = u.id
+    """
     params = ()
     if user['role'] != 'admin':
-        query += " WHERE user_id = ?"
+        query += " WHERE p.user_id = ?"
         params = (user['id'],)
-    query += " ORDER BY id DESC"
+    query += " ORDER BY p.id DESC"
     
     df_saved = pd.read_sql_query(query, conn, params=params)
+    
     if df_saved.empty:
-        st.info("Chưa có hồ sơ nào được tạo.")
+        st.info("Chưa có hồ sơ dự toán nào được lưu.")
     else:
-        st.dataframe(df_saved.style.format({
-            "direct_cost": "{:,.0f} đ",
-            "tender_price": "{:,.0f} đ"
-        }), use_container_width=True)
+        # Đổi tên cột hiển thị thân thiện
+        df_display = df_saved.rename(columns={
+            "id": "ID",
+            "nguoi_tao": "Người tạo",
+            "project_name": "Dự án",
+            "item_code": "Mã hiệu",
+            "item_name": "Tên sản phẩm",
+            "dimensions": "Kích thước (DxRxC)",
+            "direct_cost": "Chi phí gốc",
+            "tender_price": "Giá chào thầu",
+            "review_status": "Đánh giá Admin",
+            "review_note": "Ghi chú kiểm duyệt",
+            "created_at": "Thời gian tạo (Giờ VN)"
+        })
+
+        st.dataframe(
+            df_display[["ID", "Người tạo", "Dự án", "Mã hiệu", "Tên sản phẩm", "Kích thước (DxRxC)", "Chi phí gốc", "Giá chào thầu", "Đánh giá Admin", "Ghi chú kiểm duyệt", "Thời gian tạo (Giờ VN)"]].style.format({
+                "Chi phí gốc": "{:,.0f} đ",
+                "Giá chào thầu": "{:,.0f} đ"
+            }),
+            use_container_width=True
+        )
         
         st.markdown("---")
-        sel_id = st.selectbox("Chọn ID hồ sơ muốn tải lại BOQ:", df_saved["id"].tolist())
-        if sel_id:
-            df_item_detail = pd.read_sql_query(
-                "SELECT module_name, material_code, description, unit, net_qty, waste_percent, gross_qty, unit_cost, amount FROM boq_items WHERE project_id = ?",
-                conn, params=(sel_id,)
-            )
-            st.dataframe(df_item_detail.style.format({
-                "gross_qty": "{:.2f}",
-                "unit_cost": "{:,.0f} đ",
-                "amount": "{:,.0f} đ"
-            }), use_container_width=True)
+        
+        col_act1, col_act2 = st.columns([1, 1])
+        
+        # Cột 1: Tải chi tiết BOQ
+        with col_act1:
+            st.markdown("### 📥 Chi tiết BOQ & Xuất Excel")
+            sel_id = st.selectbox("Chọn ID hồ sơ:", df_saved["id"].tolist())
+            if sel_id:
+                df_item_detail = pd.read_sql_query(
+                    "SELECT module_name, material_code, description, unit, net_qty, waste_percent, gross_qty, unit_cost, amount FROM boq_items WHERE project_id = ?",
+                    conn, params=(sel_id,)
+                )
+                st.dataframe(df_item_detail.style.format({
+                    "gross_qty": "{:.2f}",
+                    "unit_cost": "{:,.0f} đ",
+                    "amount": "{:,.0f} đ"
+                }), use_container_width=True)
+                
+                buf_re = io.BytesIO()
+                with pd.ExcelWriter(buf_re, engine='openpyxl') as wr:
+                    df_item_detail.to_excel(wr, index=False, sheet_name='BOQ_ChiTiet')
+                st.download_button(
+                    f"📥 Tải file Excel của hồ sơ #{sel_id}", 
+                    data=buf_re.getvalue(), 
+                    file_name=f"BOQ_ID_{sel_id}.xlsx",
+                    use_container_width=True
+                )
+
+        # Cột 2: Đánh giá giá & Xóa hồ sơ
+        with col_act2:
+            st.markdown("### 🛡️ Thao tác Hồ sơ & Kiểm duyệt")
+            selected_row = df_saved[df_saved["id"] == sel_id].iloc[0]
+            st.info(f"Đang chọn: **#{sel_id} - {selected_row['item_name']}** (Người tạo: {selected_row['nguoi_tao']})")
             
-            buf_re = io.BytesIO()
-            with pd.ExcelWriter(buf_re, engine='openpyxl') as wr:
-                df_item_detail.to_excel(wr, index=False, sheet_name='BOQ_ChiTiet')
-            st.download_button(f"📥 Tải lại BOQ của mục ID {sel_id}", data=buf_re.getvalue(), file_name=f"BOQ_ID_{sel_id}.xlsx")
+            # Chỉ Admin mới có quyền Đánh giá Đúng/Sai giá
+            if user['role'] == 'admin':
+                st.markdown("#### 1. Đánh giá tính chính xác của Đơn giá:")
+                cur_status = selected_row['review_status'] if pd.notna(selected_row['review_status']) else 'Chờ duyệt'
+                status_options = ['Chờ duyệt', '✅ Đúng giá', '❌ Sai giá']
+                status_idx = status_options.index(cur_status) if cur_status in status_options else 0
+                
+                new_status = st.radio("Kết quả kiểm duyệt:", status_options, index=status_idx, horizontal=True)
+                new_note = st.text_input("Ghi chú của Quản trị viên:", value=selected_row['review_note'] if pd.notna(selected_row['review_note']) else '')
+                
+                if st.button("💾 Cập nhật đánh giá", type="primary", use_container_width=True):
+                    cur_u = conn.cursor()
+                    cur_u.execute("UPDATE projects SET review_status = ?, review_note = ? WHERE id = ?", (new_status, new_note, sel_id))
+                    conn.commit()
+                    st.success("Đã lưu kết quả kiểm duyệt đơn giá thành công!")
+                    time.sleep(0.5)
+                    st.rerun()
+            else:
+                st.caption(f"Trạng thái kiểm duyệt: **{selected_row['review_status']}**")
+                if selected_row['review_note']:
+                    st.caption(f"Ghi chú: {selected_row['review_note']}")
+
+            st.markdown("---")
+            # Quyền xóa hồ sơ: Admin hoặc chính chủ tạo hồ sơ
+            st.markdown("#### 2. Xóa hồ sơ:")
+            if user['role'] == 'admin' or selected_row['user_id'] == user['id']:
+                if st.button(f"🗑️ Xóa vĩnh viễn hồ sơ #{sel_id}", type="secondary", use_container_width=True):
+                    cur_d = conn.cursor()
+                    cur_d.execute("DELETE FROM boq_items WHERE project_id = ?", (sel_id,))
+                    cur_d.execute("DELETE FROM projects WHERE id = ?", (sel_id,))
+                    conn.commit()
+                    st.warning(f"Đã xóa hoàn toàn hồ sơ #{sel_id} khỏi hệ thống.")
+                    time.sleep(0.5)
+                    st.rerun()
+            else:
+                st.caption("🔒 Bạn chỉ có thể xóa các hồ sơ do chính bạn tạo.")
+
     conn.close()
 
 # TAB 3: BẢNG TRA ĐƠN GIÁ MASTER

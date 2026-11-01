@@ -7,13 +7,13 @@ import sqlite3
 import hashlib
 from datetime import datetime
 from PIL import Image
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Optional
 from google import genai
 from google.genai import types
 
 # -------------------------------------------------------------
-# 1. CẤU HÌNH HỆ THỐNG & TỰ ĐỘNG LẤY API KEY TỪ CLOUD SECRETS
+# 1. CẤU HÌNH HỆ THỐNG & ĐỌC SECRETS AN TOÀN
 # -------------------------------------------------------------
 st.set_page_config(
     page_title="Hệ Thống Dự Toán Nội Thất (AI QS)", 
@@ -22,12 +22,10 @@ st.set_page_config(
 )
 
 DB_FILE = "qs_multiuser.db"
-EXCEL_MASTER = "BIEU-MAU-DU-TOAN_MAPPED_MASTER.xlsx"
 IMAGE_DIR = "uploaded_drawings"
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
-# Lấy API Key từ Secrets của Streamlit Cloud nếu có
-# Đoạn code mới an toàn cho cả khi chạy ở máy và chạy trên Cloud:
+# Lấy API Key từ Secrets của Streamlit Cloud một cách an toàn (tránh văng lỗi khi chạy Local)
 try:
     CLOUD_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 except Exception:
@@ -82,7 +80,7 @@ def init_db():
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         )
     ''')
-    # Khởi tạo tài khoản mẫu
+    # Khởi tạo sẵn tài khoản quản trị và kỹ sư QS mặc định
     admin_pw = hashlib.sha256("admin123".encode()).hexdigest()
     qs1_pw = hashlib.sha256("qs123".encode()).hexdigest()
     c.execute("INSERT OR IGNORE INTO users (username, password_hash, full_name, role) VALUES ('admin', ?, 'Quản Trị Viên', 'admin')", (admin_pw,))
@@ -92,38 +90,87 @@ def init_db():
 
 init_db()
 
-# Đọc bảng giá master từ sheet 'ĐƠN GIÁ VT'
+# -------------------------------------------------------------
+# 2. HÀM NẠP CSDL MASTER TỰ ĐỘNG NHẬN DIỆN MỌI ĐỊNH DẠNG FILE
+# -------------------------------------------------------------
 @st.cache_data(ttl=600)
 def load_price_master():
-    if not os.path.exists(EXCEL_MASTER):
-        return {}
-    df_raw = pd.read_excel(EXCEL_MASTER, sheet_name='ĐƠN GIÁ VT', header=None)
-    price_dict = {}
-    current_cat = "CHUNG"
-    for r in range(2, len(df_raw)):
-        code = df_raw.iloc[r, 1]
-        name = df_raw.iloc[r, 2]
-        unit = df_raw.iloc[r, 3]
-        price = df_raw.iloc[r, 5]
-        if pd.isna(code) and pd.notna(name):
-            current_cat = str(name).strip()
-        elif pd.notna(code) and pd.notna(name) and pd.notna(price):
-            try:
-                p_val = float(price)
-            except:
-                p_val = 0.0
-            price_dict[str(code).strip()] = {
-                "category": current_cat,
-                "name": str(name).strip().replace('\n', ' '),
-                "unit": str(unit).strip() if pd.notna(unit) else 'cái',
-                "unit_cost": p_val
-            }
-    return price_dict
+    # Danh sách các tên file ưu tiên kiểm tra
+    candidate_files = [
+        "BIEU-MAU-DU-TOAN_MAPPED_MASTER.xlsx",
+        "BIEU-MAU-DU-TOAN_VERSION-2.xlsx",
+        "Gia cost_updated.xlsx",
+        "Gia cost.xlsx",
+        "Gia_cost_CapNhat_AI.xlsx"
+    ]
+    
+    target_file = None
+    for fname in candidate_files:
+        if os.path.exists(fname):
+            target_file = fname
+            break
+            
+    # Nếu không trùng tên danh sách trên, tự động quét bất kỳ file .xlsx nào có trong thư mục
+    if not target_file:
+        all_xlsx = [f for f in os.listdir(".") if f.endswith(".xlsx") and not f.startswith("~$")]
+        if all_xlsx:
+            target_file = all_xlsx[0]
+        else:
+            return {}, "Không tìm thấy file Excel đơn giá nào"
 
-PRICE_MASTER = load_price_master()
+    try:
+        xls = pd.ExcelFile(target_file)
+        
+        # Tự động tìm sheet chứa dữ liệu đơn giá
+        target_sheet = None
+        for s in xls.sheet_names:
+            s_clean = s.strip().lower()
+            if any(k in s_clean for k in ["đơn giá vt", "don gia vt", "dongia", "vt"]):
+                target_sheet = s
+                break
+        if not target_sheet:
+            target_sheet = xls.sheet_names[0]
+
+        df_raw = pd.read_excel(target_file, sheet_name=target_sheet, header=None)
+        
+        # Nhận diện cấu trúc file theo tên sheet
+        is_gia_cost = "dongia" in str(target_sheet).lower()
+        col_code = 1
+        col_name = 2
+        col_unit = 4
+        col_price = 7 if is_gia_cost else 5
+        start_row = 6 if is_gia_cost else 2
+
+        price_dict = {}
+        current_cat = "CHUNG"
+
+        for r in range(start_row, len(df_raw)):
+            code = df_raw.iloc[r, col_code]
+            name = df_raw.iloc[r, col_name]
+            unit = df_raw.iloc[r, col_unit] if len(df_raw.columns) > col_unit else 'cái'
+            price = df_raw.iloc[r, col_price] if len(df_raw.columns) > col_price else 0
+
+            if pd.isna(code) and pd.notna(name):
+                current_cat = str(name).strip()
+            elif pd.notna(code) and pd.notna(name) and pd.notna(price):
+                try:
+                    p_val = float(price)
+                except Exception:
+                    p_val = 0.0
+                price_dict[str(code).strip()] = {
+                    "category": current_cat,
+                    "name": str(name).strip().replace('\n', ' '),
+                    "unit": str(unit).strip() if pd.notna(unit) else 'cái',
+                    "unit_cost": p_val
+                }
+        return price_dict, f"{target_file} (Sheet: {target_sheet})"
+    except Exception as e:
+        return {}, f"Lỗi đọc file: {str(e)}"
+
+PRICE_MASTER, SOURCE_INFO = load_price_master()
 
 # -------------------------------------------------------------
-# 2. XỬ LÝ ĐĂNG NHẬP & PHÂN QUYỀN
+# 3. XỬ LÝ ĐĂNG NHẬP & PHÂN QUYỀN
 # -------------------------------------------------------------
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
@@ -157,11 +204,11 @@ if not st.session_state['logged_in']:
         p_in = st.text_input("Mật khẩu:", type="password")
         if st.button("Đăng nhập", type="primary", use_container_width=True):
             login(u_in, p_in)
-        st.caption("Tài khoản mặc định: `admin` / `admin123` hoặc `qs01` / `qs123`")
+        st.caption("Tài khoản mẫu: `admin` / `admin123` hoặc `qs01` / `qs123`")
     st.stop()
 
 # -------------------------------------------------------------
-# 3. SCHEMA DỮ LIỆU ĐỊNH NGHĨA CHO AI
+# 4. SCHEMA DỮ LIỆU ĐỊNH NGHĨA CHO AI
 # -------------------------------------------------------------
 class ComponentItem(BaseModel):
     component_id: str
@@ -185,7 +232,7 @@ class TakeoffResult(BaseModel):
     technical_risks_and_notes: List[str]
 
 # -------------------------------------------------------------
-# 4. GIAO DIỆN CHÍNH
+# 5. GIAO DIỆN CHÍNH
 # -------------------------------------------------------------
 user = st.session_state['user_info']
 
@@ -196,7 +243,7 @@ with st.sidebar:
     st.markdown("---")
     st.header("⚙️ Cấu hình hệ thống")
     
-    # Nếu Cloud đã có Secrets thì ẩn ô nhập, nếu chưa có thì cho nhập thủ công
+    # Tự động nhận diện API Key từ Cloud Secrets nếu có
     if CLOUD_API_KEY:
         api_key = CLOUD_API_KEY
         st.success("✅ Đã kết nối Gemini API từ Cloud")
@@ -205,6 +252,7 @@ with st.sidebar:
         
     overhead_rate = st.slider("Chi phí chung (Overhead) %:", 0, 25, 8)
     profit_rate = st.slider("Lợi nhuận mục tiêu (Margin) %:", 0, 30, 12)
+    st.caption(f"Nguồn dữ liệu: `{SOURCE_INFO}`")
     st.caption(f"Đã nạp **{len(PRICE_MASTER)}** mã đơn giá Master.")
 
 tab1, tab2, tab3 = st.tabs(["📝 Bóc Tách Dự Toán Mới", "📂 Thư Viện Hồ Sơ Đã Lưu", "📊 Bảng Tra Đơn Giá Master"])
@@ -238,7 +286,7 @@ with tab1:
         st.subheader("2. Bảng BOQ & Chiết tính chi phí xưởng")
         if submit_btn:
             if not api_key:
-                st.error("Vui lòng cấu hình Gemini API Key.")
+                st.error("Vui lòng cấu hình Gemini API Key ở thanh bên trái.")
             elif not uploaded_files:
                 st.warning("Vui lòng tải lên ít nhất 1 ảnh phối cảnh hoặc bản vẽ kỹ thuật.")
             else:
@@ -284,7 +332,7 @@ with tab1:
 
                         data = json.loads(response.text)
                         
-                        # Khớp đơn giá từ Master Excel
+                        # Khớp đơn giá từ Master Database
                         total_direct = 0
                         boq_records = []
                         for sub in data.get("structural_breakdown", []):
@@ -413,8 +461,8 @@ with tab2:
 
 # TAB 3: BẢNG TRA ĐƠN GIÁ MASTER
 with tab3:
-    st.subheader("📊 Bảng Tra Cứu Đơn Giá Master (1.085 mã)")
-    st.caption(f"Nguồn dữ liệu: `{EXCEL_MASTER}`")
+    st.subheader("📊 Bảng Tra Cứu Đơn Giá Master")
+    st.caption(f"Nguồn dữ liệu hiện hành: `{SOURCE_INFO}`")
     if PRICE_MASTER:
         df_pview = pd.DataFrame.from_dict(PRICE_MASTER, orient='index').reset_index()
         df_pview.columns = ["MÃ CODE", "NHÓM", "TÊN VẬT TƯ / NHÂN CÔNG", "ĐVT", "ĐƠN GIÁ XƯỞNG"]
@@ -425,4 +473,4 @@ with tab3:
             
         st.dataframe(df_pview.style.format({"ĐƠN GIÁ XƯỞNG": "{:,.0f} đ"}), use_container_width=True, height=500)
     else:
-        st.warning(f"Chưa tìm thấy file `{EXCEL_MASTER}` trong cùng thư mục.")
+        st.warning("Chưa nạp được danh mục đơn giá. Vui lòng kiểm tra lại file Excel.")

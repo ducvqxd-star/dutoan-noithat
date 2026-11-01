@@ -3,17 +3,18 @@ import pandas as pd
 import json
 import io
 import os
+import time
 import sqlite3
 import hashlib
 from datetime import datetime
 from PIL import Image
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 from google import genai
 from google.genai import types
 
 # -------------------------------------------------------------
-# 1. CẤU HÌNH HỆ THỐNG & ĐỌC SECRETS AN TOÀN
+# 1. CẤU HÌNH GIAO DIỆN & TỰ ĐỘNG LẤY API KEY TỪ CLOUD SECRETS
 # -------------------------------------------------------------
 st.set_page_config(
     page_title="Hệ Thống Dự Toán Nội Thất (AI QS)", 
@@ -25,7 +26,7 @@ DB_FILE = "qs_multiuser.db"
 IMAGE_DIR = "uploaded_drawings"
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
-# Lấy API Key từ Secrets của Streamlit Cloud một cách an toàn (tránh văng lỗi khi chạy Local)
+# Lấy API Key từ Secrets của Streamlit Cloud (bảo vệ tránh crash khi chạy local)
 try:
     CLOUD_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 except Exception:
@@ -34,7 +35,6 @@ except Exception:
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Bảng người dùng
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,7 +44,6 @@ def init_db():
             role TEXT
         )
     ''')
-    # Bảng lưu hồ sơ dự toán theo từng User
     c.execute('''
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,7 +62,6 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     ''')
-    # Bảng lưu chi tiết từng dòng BOQ
     c.execute('''
         CREATE TABLE IF NOT EXISTS boq_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,7 +78,7 @@ def init_db():
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         )
     ''')
-    # Khởi tạo sẵn tài khoản quản trị và kỹ sư QS mặc định
+    # Tài khoản mặc định: admin / admin123 và qs01 / qs123
     admin_pw = hashlib.sha256("admin123".encode()).hexdigest()
     qs1_pw = hashlib.sha256("qs123".encode()).hexdigest()
     c.execute("INSERT OR IGNORE INTO users (username, password_hash, full_name, role) VALUES ('admin', ?, 'Quản Trị Viên', 'admin')", (admin_pw,))
@@ -91,10 +89,7 @@ def init_db():
 init_db()
 
 # -------------------------------------------------------------
-# 2. HÀM NẠP CSDL MASTER TỰ ĐỘNG NHẬN DIỆN MỌI ĐỊNH DẠNG FILE
-# -------------------------------------------------------------
-# -------------------------------------------------------------
-# 2. HÀM NẠP CSDL MASTER TỰ ĐỘNG KHỚP CỘT (Sheet DMVT / Cột O)
+# 2. BỘ NẠP MASTER EXCEL TỰ ĐỘNG ĐỊNH VỊ CỘT O VÀ CỘT D (ĐVT)
 # -------------------------------------------------------------
 @st.cache_data(ttl=600)
 def load_price_master():
@@ -117,12 +112,10 @@ def load_price_master():
         if all_xlsx:
             target_file = all_xlsx[0]
         else:
-            return {}, "Không tìm thấy file Excel"
+            return {}, "Không tìm thấy file Excel đơn giá"
 
     try:
         xls = pd.ExcelFile(target_file)
-        
-        # Nhận diện sheet: Ưu tiên DMVT hoặc ĐƠN GIÁ VT
         target_sheet = None
         for s in xls.sheet_names:
             s_clean = s.strip().lower()
@@ -134,16 +127,15 @@ def load_price_master():
 
         df_raw = pd.read_excel(target_file, sheet_name=target_sheet, header=None)
         
-        # Mặc định theo cấu trúc sheet DMVT (Cột O là Đơn giá)
-        # Cột B: Mã (index 1), Cột C: Tên (index 2), Cột D: ĐVT (index 3), Cột O: Đơn giá (index 14)
+        # Mặc định cấu trúc bảng: Cột B (Mã: 1), C (Tên: 2), D (ĐVT: 3), O (Đơn giá: 14)
         col_code = 1
         col_name = 2
-        col_unit = 3   # Cột D (ĐVT)
-        col_price = 14 # Cột O (ĐƠN GIÁ)
-        start_row = 3  # Dữ liệu bắt đầu từ dòng 4 (index 3)
+        col_unit = 3
+        col_price = 14
+        start_row = 3
 
-        # Quét tìm dòng tiêu đề thực tế để định vị chính xác vị trí các cột
-        for r_idx in range(min(10, len(df_raw))):
+        # Quét tìm dòng tiêu đề thực tế nếu cấu trúc có xê dịch
+        for r_idx in range(min(12, len(df_raw))):
             row_vals = [str(x).strip().lower() for x in df_raw.iloc[r_idx] if pd.notna(x)]
             if any("đơn giá" in v or "thành tiền" in v for v in row_vals):
                 for c_idx, val in enumerate(df_raw.iloc[r_idx]):
@@ -176,7 +168,6 @@ def load_price_master():
                 current_cat = str(name).strip()
             elif pd.notna(code) and pd.notna(name):
                 try:
-                    # Chuyển đổi định dạng số (xử lý cả dạng chuỗi có dấu phẩy ngăn cách)
                     if isinstance(price, (int, float)):
                         p_val = float(price)
                     else:
@@ -184,7 +175,7 @@ def load_price_master():
                 except Exception:
                     p_val = 0.0
                 
-                # Chỉ nhận các mã có giá trị hợp lệ
+                # Chỉ lấy các mã có giá trị hợp lệ (> 0)
                 if p_val > 0:
                     price_dict[str(code).strip()] = {
                         "category": current_cat,
@@ -199,7 +190,7 @@ def load_price_master():
 PRICE_MASTER, SOURCE_INFO = load_price_master()
 
 # -------------------------------------------------------------
-# 3. XỬ LÝ ĐĂNG NHẬP & PHÂN QUYỀN
+# 3. QUẢN LÝ PHIÊN ĐĂNG NHẬP (MULTI-USER)
 # -------------------------------------------------------------
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
@@ -237,7 +228,7 @@ if not st.session_state['logged_in']:
     st.stop()
 
 # -------------------------------------------------------------
-# 4. SCHEMA DỮ LIỆU ĐỊNH NGHĨA CHO AI
+# 4. CẤU TRÚC DỮ LIỆU ĐỊNH NGHĨA CHO AI (PYDANTIC SCHEMA)
 # -------------------------------------------------------------
 class ComponentItem(BaseModel):
     component_id: str
@@ -261,7 +252,7 @@ class TakeoffResult(BaseModel):
     technical_risks_and_notes: List[str]
 
 # -------------------------------------------------------------
-# 5. GIAO DIỆN CHÍNH
+# 5. GIAO DIỆN CHÍNH CỦA ỨNG DỤNG
 # -------------------------------------------------------------
 user = st.session_state['user_info']
 
@@ -272,7 +263,6 @@ with st.sidebar:
     st.markdown("---")
     st.header("⚙️ Cấu hình hệ thống")
     
-    # Tự động nhận diện API Key từ Cloud Secrets nếu có
     if CLOUD_API_KEY:
         api_key = CLOUD_API_KEY
         st.success("✅ Đã kết nối Gemini API từ Cloud")
@@ -286,7 +276,7 @@ with st.sidebar:
 
 tab1, tab2, tab3 = st.tabs(["📝 Bóc Tách Dự Toán Mới", "📂 Thư Viện Hồ Sơ Đã Lưu", "📊 Bảng Tra Đơn Giá Master"])
 
-# TAB 1: BÓC TÁCH MỚI
+# TAB 1: BÓC TÁCH KHỐI LƯỢNG
 with tab1:
     c1, c2 = st.columns([1, 1])
     with c1:
@@ -305,7 +295,7 @@ with tab1:
 
         specs = st.text_area(
             "Quy cách kỹ thuật & Vật liệu chỉ định:",
-            height=120, 
+            height=130, 
             value="- Kệ treo: Thanh Inox La 5x15mm mạ màu PVD, đợt gỗ sơn hoàn thiện rãnh LED.\n- Tủ dưới: Thùng cánh MDF chống ẩm phủ Melamine An Cường.\n- Tủ đứng: Cánh kính khung nhôm Slim, bản lề trục xoay âm nóc-đáy, đợt đỡ chai rượu nghiêng.\n- Mặt bàn bar: Đá nung kết Neolith líp mòi 45 độ, lót đệm ván Plywood.\n- Vách màng căng vi sinh xuyên sáng kèm hệ LED ziczac hộp đèn."
         )
 
@@ -315,11 +305,11 @@ with tab1:
         st.subheader("2. Bảng BOQ & Chiết tính chi phí xưởng")
         if submit_btn:
             if not api_key:
-                st.error("Vui lòng cấu hình Gemini API Key ở thanh bên trái.")
+                st.error("Vui lòng cấu hình Gemini API Key.")
             elif not uploaded_files:
-                st.warning("Vui lòng tải lên ít nhất 1 ảnh phối cảnh hoặc bản vẽ kỹ thuật.")
+                st.warning("Vui lòng tải lên ít nhất 1 ảnh bản vẽ kỹ thuật.")
             else:
-                with st.spinner("AI QS đang đọc bản vẽ, bóc tách khối lượng và tra cứu đơn giá master..."):
+                with st.spinner("AI QS đang bóc tách hình học và tra cứu đơn giá master..."):
                     try:
                         client = genai.Client(api_key=api_key)
                         images = []
@@ -333,31 +323,58 @@ with tab1:
                             saved_paths.append(spath)
 
                         prompt = f"""
-                        BÓC TÁCH KHỐI LƯỢNG KỸ THUẬT NỘI THẤT:
-                        - Mã hiệu: {item_code} | Tên: {item_name} | Kích thước: {dimensions}
-                        - Quy cách vật liệu:
+                        BÓC TÁCH KỸ THUẬT NỘI THẤT (ĐỘ CHÍNH XÁC CAO - QUY TẮC BẮT BUỘC):
+                        - Hạng mục: {item_name} | Mã hiệu: {item_code}
+                        - Kích thước phủ bì cố định: {dimensions}
+                        - Quy cách vật liệu thực tế:
                         {specs}
-                        - LƯU Ý BẮT BUỘC: Ánh xạ mã material_master_code chuẩn theo hệ mã phân tầng Master:
-                          + Đá nung kết / gia công líp mòi: 10.03.01, 10.03.02, 10.03.03, 10.03.04
-                          + Cánh kính Slim & Phụ kiện âm: 9.03.01, 15.02.01, 15.02.02
-                          + Màng xuyên sáng & LED hộp đèn: 16.03.01, 16.03.02, 16.03.03, 16.03.04
-                          + Inox La PVD & Kệ treo trần: 8.03.01, 8.03.02, 15.03.01, 17.01.07
-                          + Da bọc vách / nệm: 12.02.01, 12.02.02, 12.02.03, 17.02.27
-                          + Ván MDF chống ẩm Melamine: 3.01.04 (hoặc mã tương đương trong kho)
-                          + Nhân công lắp đặt hiện trường: 17.02.01 đến 17.02.26
+
+                        QUY TẮC HÌNH HỌC & ĐỊNH MỨC BẮT BUỘC:
+                        1. TÍNH TOÁN THEO KÍCH THƯỚC PHỦ BÌ:
+                           - Tổng diện tích mặt đứng không được vượt quá: (Dài x Cao) / 1.000.000 (m2).
+                           - Bóc tách đúng các module: thùng, hậu, vách, cánh, mặt đá, nẹp viền.
+                        2. TUÂN THỦ NGHIÊM NGẶT SPECS:
+                           - Chỉ bóc tách những gì thực sự có trong bản vẽ và được nêu trong phần quy cách. Tuyệt đối không tự ý thêm hạng mục ngoài lề.
+                        3. HỆ SỐ HAO HỤT (waste_factor_percent) CỐ ĐỊNH:
+                           - Ván công nghiệp (MDF, MFC, Plywood): cố định đúng 8.0%
+                           - Đá tự nhiên / Đá nung kết: cố định đúng 10.0%
+                           - Thanh Inox La / Nhôm Slim / Phụ kiện: cố định đúng 5.0%
+                           - Màng căng xuyên sáng: cố định đúng 10.0%
+                        4. ÁNH XẠ MÃ VẬT TƯ (material_master_code): Phải khớp chính xác với hệ mã Master trong CSDL.
                         """
 
-                        response = client.models.generate_content(
-                            model='gemini-3.8-flash',
-                            contents=[*images, prompt],
-                            config=types.GenerateContentConfig(
-                                system_instruction="BẠN LÀ SENIOR QS NỘI THẤT. Bóc tách khối lượng net, tỷ lệ hao hụt waste%, mapping material_master_code phân tầng chuẩn xác.",
-                                response_mime_type="application/json",
-                                response_schema=TakeoffResult,
-                                temperature=0.1,
-                                thinking_config=types.ThinkingConfig(thinking_budget=0)
-                            )
-                        )
+                        # Cơ chế Retry & Fallback xử lý lỗi 503 / 429
+                        MODELS_TO_TRY = ['gemini-2.5-flash', 'gemini-1.5-flash']
+                        response = None
+                        last_err = None
+
+                        for current_model in MODELS_TO_TRY:
+                            for attempt in range(3):
+                                try:
+                                    response = client.models.generate_content(
+                                        model=current_model,
+                                        contents=[*images, prompt],
+                                        config=types.GenerateContentConfig(
+                                            system_instruction="BẠN LÀ CHUYÊN GIA SENIOR QS NỘI THẤT. Tính toán khối lượng tất định, không suy diễn ngẫu nhiên, mapping mã vật tư chuẩn xác.",
+                                            response_mime_type="application/json",
+                                            response_schema=TakeoffResult,
+                                            temperature=0.0,
+                                            thinking_config=types.ThinkingConfig(thinking_budget=0) if "2.5" in current_model else None
+                                        )
+                                    )
+                                    break
+                                except Exception as err:
+                                    last_err = err
+                                    err_str = str(err)
+                                    if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
+                                        time.sleep(2 * (attempt + 1))
+                                    else:
+                                        break
+                            if response:
+                                break
+
+                        if not response:
+                            raise last_err
 
                         data = json.loads(response.text)
                         
@@ -367,8 +384,12 @@ with tab1:
                         for sub in data.get("structural_breakdown", []):
                             m_name = sub.get("sub_assembly_name")
                             for comp in sub.get("components", []):
-                                code = comp.get("material_master_code", "DEFAULT")
-                                item_info = PRICE_MASTER.get(code, {"name": comp.get("description"), "unit": comp.get("unit"), "unit_cost": 250000})
+                                code = str(comp.get("material_master_code", "DEFAULT")).strip()
+                                item_info = PRICE_MASTER.get(code, {
+                                    "name": comp.get("description"), 
+                                    "unit": comp.get("unit"), 
+                                    "unit_cost": 250000.0
+                                })
                                 u_cost = item_info["unit_cost"]
                                 gross_q = comp.get("gross_quantity", 0.0)
                                 amt = gross_q * u_cost
@@ -379,7 +400,7 @@ with tab1:
                                     "material_code": code,
                                     "description": comp.get("description"),
                                     "technical_spec": comp.get("technical_spec"),
-                                    "unit": comp.get("unit"),
+                                    "unit": item_info.get("unit", comp.get("unit")),
                                     "net_qty": comp.get("net_quantity"),
                                     "waste_percent": comp.get("waste_factor_percent"),
                                     "gross_qty": gross_q,
@@ -390,7 +411,7 @@ with tab1:
                         overhead_amt = total_direct * (overhead_rate / 100.0)
                         tender_amt = (total_direct + overhead_amt) * (1 + profit_rate / 100.0)
 
-                        # Lưu vào CSDL
+                        # Lưu vào CSDL nội bộ
                         conn = sqlite3.connect(DB_FILE)
                         cur = conn.cursor()
                         cur.execute('''
@@ -427,8 +448,8 @@ with tab1:
                         df_view = pd.DataFrame(boq_records)
                         st.dataframe(df_view[["module_name", "material_code", "description", "unit", "gross_qty", "unit_cost", "amount"]].style.format({
                             "gross_qty": "{:.2f}",
-                            "unit_cost": "{:,.0f}",
-                            "amount": "{:,.0f}"
+                            "unit_cost": "{:,.0f} đ",
+                            "amount": "{:,.0f} đ"
                         }), use_container_width=True)
 
                         st.markdown("⚠️ **Lưu ý kỹ thuật & Cảnh báo thi công:**")
@@ -478,8 +499,8 @@ with tab2:
             )
             st.dataframe(df_item_detail.style.format({
                 "gross_qty": "{:.2f}",
-                "unit_cost": "{:,.0f}",
-                "amount": "{:,.0f}"
+                "unit_cost": "{:,.0f} đ",
+                "amount": "{:,.0f} đ"
             }), use_container_width=True)
             
             buf_re = io.BytesIO()

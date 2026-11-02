@@ -81,7 +81,7 @@ def calculate_standard_labor(length_m: float, depth_m: float, height_m: float, s
     """
     Tính định mức nhân công sản xuất và lắp đặt cho mọi sản phẩm:
     - Công thức dựa trên diện tích mặt đứng, độ phức tạp đa vật liệu.
-    - NGUYÊN TẮC BẮT BUỘC: Làm tròn lên số nguyên gần nhất (math.ceil).
+    - NGUYÊN TẮC: Làm tròn lên số nguyên gần nhất (math.ceil).
     """
     s_face = max(length_m * height_m, 1.0)
     spec_low = str(specs_text).lower()
@@ -296,7 +296,7 @@ def load_price_master():
                         "unit_cost": p_val
                     }
         
-        # Bổ sung danh mục định mức nhân công và vật tư chuẩn
+        # Bổ sung danh mục định mức nhân công và vật tư chuẩn xưởng mộc
         special_items = {
             "NC-SX": {"category": "NHÂN CÔNG", "name": "NC-SX: Nhân công sản xuất mộc xưởng (Định mức)", "unit": "Công", "unit_cost": 500000.0},
             "NC-LD": {"category": "NHÂN CÔNG", "name": "NC-LD: Nhân công lắp đặt hoàn thiện công trình (Định mức)", "unit": "Công", "unit_cost": 550000.0},
@@ -423,7 +423,7 @@ def resolve_material_master(section_code: str, raw_code: str, description: str, 
             cand = PRICE_MASTER.get(m_code, {"category": "VÁN", "name": "MDF thường E2 melamine nhóm A - 17mm", "unit": "m2", "unit_cost": 165984.0})
             return target_sec, m_code, cand
 
-    # 6. Khung thép hộp (Mục II - Vật tư thô)
+    # 6. Khung thép hộp (Mục II - Vật tư thô, không phải nhân công)
     if any(k in full_text for k in ["sắt hộp", "khung sắt", "khung thép", "khung xương", "hộp kẽm"]):
         target_sec = "II. VẬT TƯ CHÍNH"
         m_code = "KS.V30"
@@ -606,7 +606,7 @@ with st.sidebar:
     st.caption(f"Nguồn dữ liệu: `{SOURCE_INFO}`")
     st.caption(f"Đã nạp **{len(PRICE_MASTER)}** mã đơn giá Master.")
 
-tab1, tab2, tab3 = st.tabs(["📝 Bóc Tách Dự Toán Mới", "📂 Thư Viện Hồ Sơ & Chỉnh Sửa Chiết Tính", "📊 Bảng Tra Đơn Giá Master"])
+tab1, tab2, tab3 = st.tabs(["📝 Bóc Tách Dự Toán Mới", "📂 Thư Viện Hồ Sơ & Chỉnh Sửa Chiết Tính", "📊 Quản Lý Đơn Giá Master"])
 
 # TAB 1: BÓC TÁCH MỚI
 with tab1:
@@ -659,9 +659,7 @@ with tab1:
                         d_m = d_mm / 1000.0
                         h_m = h_mm / 1000.0
 
-                        # Tính định mức nhân công tự động cho sản phẩm (làm tròn lên)
                         prod_days_calc, inst_days_calc = calculate_standard_labor(l_m, d_m, h_m, specs)
-
                         bench_id, benchmark_context = get_approved_benchmark(item_code, item_name)
 
                         prompt = f"""
@@ -870,7 +868,10 @@ with tab1:
                         conn.commit()
                         conn.close()
 
-                        st.success(f"✅ Bóc tách chiết tính thành công lúc {created_time_vn} (Giờ VN)!")
+                        if benchmark_context:
+                            st.success(f"✅ Đã kế thừa và học tập 100% từ Hồ sơ chuẩn #{bench_id} lúc {created_time_vn} (Giờ VN)!")
+                        else:
+                            st.success(f"✅ Bóc tách chiết tính thành công lúc {created_time_vn} (Giờ VN)!")
                         
                         m1, m2, m3 = st.columns(3)
                         m1.metric("Tổng giá Cost xưởng (Direct)", f"{total_direct:,.0f} đ")
@@ -1237,18 +1238,94 @@ with tab2:
 
     conn.close()
 
-# TAB 3: BẢNG TRA ĐƠN GIÁ MASTER
+# -------------------------------------------------------------
+# TAB 3: QUẢN LÝ & CHỈNH SỬA TRỰC TIẾP ĐƠN GIÁ MASTER
+# -------------------------------------------------------------
 with tab3:
-    st.subheader("📊 Bảng Tra Cứu Đơn Giá Master")
-    st.caption(f"Nguồn dữ liệu hiện hành: `{SOURCE_INFO}`")
+    st.subheader("📊 Quản Lý & Chỉnh Sửa Đơn Giá Master")
+    st.caption(f"Nguồn dữ liệu hiện hành: `{SOURCE_INFO}` | Tổng số mã: **{len(PRICE_MASTER)}**")
+
+    # --- KHU VỰC 1: UPLOAD FILE EXCEL MASTER MỚI ---
+    with st.expander("📤 **Tải lên file Excel Đơn giá mới (Ghi đè file hiện tại)**", expanded=False):
+        uploaded_master = st.file_uploader(
+            "Chọn file Excel đơn giá mới (.xlsx):", 
+            type=["xlsx"], 
+            key="uploader_master_file"
+        )
+        if uploaded_master is not None:
+            if st.button("Xác nhận nạp file Master này", type="primary"):
+                save_master_name = "BIEU-MAU-DU-TOAN_MAPPED_MASTER.xlsx"
+                with open(save_master_name, "wb") as f:
+                    f.write(uploaded_master.getbuffer())
+                
+                st.cache_data.clear()
+                st.success("✅ Đã cập nhật file Master thành công! Đang tải lại dữ liệu...")
+                time.sleep(1)
+                st.rerun()
+
+    st.markdown("---")
+
+    # --- KHU VỰC 2: CHỈNH SỬA TRỰC TIẾP TRÊN WEB ---
     if PRICE_MASTER:
-        df_pview = pd.DataFrame.from_dict(PRICE_MASTER, orient='index').reset_index()
-        df_pview.columns = ["MÃ CODE", "NHÓM", "TÊN VẬT TƯ / NHÂN CÔNG", "ĐVT", "ĐƠN GIÁ XƯỞNG"]
+        state_master_key = "df_master_edit_cache"
+        if state_master_key not in st.session_state:
+            df_pm = pd.DataFrame.from_dict(PRICE_MASTER, orient='index').reset_index()
+            df_pm.columns = ["MÃ CODE", "NHÓM", "TÊN VẬT TƯ / NHÂN CÔNG", "ĐVT", "ĐƠN GIÁ XƯỞNG"]
+            st.session_state[state_master_key] = df_pm
+
+        c_search, c_btn = st.columns([3, 1])
+        with c_search:
+            search_kw = st.text_input("🔍 Lọc nhanh danh mục (gõ mã hoặc tên):", placeholder="Ví dụ: đá, da, mdf, nhân công, thép...")
         
-        search_kw = st.text_input("🔍 Tìm kiếm vật tư nhanh (ví dụ: 'đá', 'da', 'thép hộp', 'nhân công', 'inox'):")
+        df_to_edit = st.session_state[state_master_key]
         if search_kw:
-            df_pview = df_pview[df_pview['TÊN VẬT TƯ / NHÂN CÔNG'].str.contains(search_kw, case=False, na=False) | df_pview['MÃ CODE'].str.contains(search_kw, case=False, na=False)]
-            
-        st.dataframe(df_pview.style.format({"ĐƠN GIÁ XƯỞNG": "{:,.0f} đ"}), use_container_width=True, height=500)
+            view_mask = (
+                df_to_edit['TÊN VẬT TƯ / NHÂN CÔNG'].str.contains(search_kw, case=False, na=False) | 
+                df_to_edit['MÃ CODE'].str.contains(search_kw, case=False, na=False)
+            )
+            df_sub = df_to_edit[view_mask]
+        else:
+            df_sub = df_to_edit
+
+        edited_master_df = st.data_editor(
+            df_sub,
+            use_container_width=True,
+            num_rows="dynamic",
+            height=520,
+            key="master_data_editor_table",
+            column_config={
+                "MÃ CODE": st.column_config.TextColumn("Mã Code", required=True),
+                "NHÓM": st.column_config.TextColumn("Nhóm vật tư"),
+                "TÊN VẬT TƯ / NHÂN CÔNG": st.column_config.TextColumn("Tên vật tư / Quy cách", required=True),
+                "ĐVT": st.column_config.TextColumn("ĐVT", required=True),
+                "ĐƠN GIÁ XƯỞNG": st.column_config.NumberColumn("Đơn giá xưởng (VNĐ)", min_value=0.0, format="%d đ", required=True)
+            }
+        )
+
+        c_save_m, c_dl_m = st.columns([2, 2])
+        with c_save_m:
+            if st.button("💾 Lưu thay đổi vào file Master & Cập nhật hệ thống", type="primary", use_container_width=True):
+                st.session_state[state_master_key].update(edited_master_df)
+                
+                target_save_file = "BIEU-MAU-DU-TOAN_MAPPED_MASTER.xlsx"
+                with pd.ExcelWriter(target_save_file, engine='openpyxl') as writer:
+                    st.session_state[state_master_key].to_excel(writer, index=False, sheet_name='DMVT')
+                
+                st.cache_data.clear()
+                st.success("✅ Đã lưu trực tiếp toàn bộ đơn giá mới vào file Master!")
+                time.sleep(1)
+                st.rerun()
+
+        with c_dl_m:
+            buf_master_export = io.BytesIO()
+            with pd.ExcelWriter(buf_master_export, engine='openpyxl') as wr:
+                st.session_state[state_master_key].to_excel(wr, index=False, sheet_name='DMVT')
+            st.download_button(
+                "📥 Tải file Excel Master hiện hành về máy",
+                data=buf_master_export.getvalue(),
+                file_name="Don_Gia_Master_CapNhat.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
     else:
-        st.warning("Chưa nạp được danh mục đơn giá. Vui lòng kiểm tra lại file Excel.")
+        st.warning("Chưa có danh mục đơn giá. Hãy tải lên file Excel ở trên.")

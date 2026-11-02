@@ -16,11 +16,22 @@ from google import genai
 from google.genai import types
 
 # -------------------------------------------------------------
-# 1. CẤU HÌNH GIAO DIỆN & TĂNG TƯƠNG PHẢN (CHỐNG MỜ CHỮ)
+# 1. CẤU HÌNH GIAO DIỆN & TỰ ĐỘNG NẠP LOGO SPACE
 # -------------------------------------------------------------
+LOGO_FILE = None
+for fname in ["logo.png", "logo.jpg", "logo.jpeg"]:
+    if os.path.exists(fname):
+        LOGO_FILE = fname
+        break
+
+if LOGO_FILE:
+    app_icon = Image.open(LOGO_FILE)
+else:
+    app_icon = "🏗️"
+
 st.set_page_config(
-    page_title="Hệ Thống Dự Toán Nội Thất (AI QS)", 
-    page_icon="🏗️",
+    page_title="Hệ Thống Dự Toán Nội Thất - SPACE", 
+    page_icon=app_icon,
     layout="wide"
 )
 
@@ -245,12 +256,17 @@ def load_price_master():
                         "unit_cost": p_val
                     }
         
-        # Bổ sung các mã vật tư định mức bắt buộc của xưởng mộc
+        # Bổ sung danh mục định mức xưởng chuẩn
         special_items = {
             "ST.01": {"category": "ĐÁ", "name": "ST-01: Đá tam tính", "unit": "m2", "unit_cost": 3000000.0},
             "FB LE-01": {"category": "SOURCE NGOÀI", "name": "FB LE-01: Da tam tính (Hậu tủ bọc da)", "unit": "m2", "unit_cost": 500000.0},
+            "KI.1.04": {"category": "SOURCE NGOÀI", "name": "Kính trong cường lực - 5 mm", "unit": "m2", "unit_cost": 1000000.0},
             "IN-DHX12": {"category": "KIM LOẠI", "name": "IN-DHX12: Thanh Inox La PVD treo đợt", "unit": "m2", "unit_cost": 3672000.0},
-            "B.BBTN.1": {"category": "BAO BÌ", "name": "B.BBTN.1: Bao bì sản phẩm (Màng PE, carton)", "unit": "m2", "unit_cost": 25353.0}
+            "B.BBTN.1": {"category": "BAO BÌ", "name": "B.BBTN.1: Bao bì sản phẩm (Màng PE, carton)", "unit": "m2", "unit_cost": 25353.0},
+            "ANC.MEL.3.03": {"category": "VÁN", "name": "MDF thường E2 melamine nhóm A - 17mm", "unit": "m2", "unit_cost": 165984.0},
+            "ANC.MEL.3.01": {"category": "VÁN", "name": "MDF thường E2 melamine nhóm A - 9mm", "unit": "m2", "unit_cost": 120000.0},
+            "SAT.1.05": {"category": "KIM LOẠI", "name": "Khung sắt hộp gia cố 20x40x1.2mm", "unit": "md", "unit_cost": 35000.0},
+            "VTK.1.10": {"category": "PHỤ KIỆN", "name": "VK - Len chân nhựa", "unit": "md", "unit_cost": 25000.0}
         }
         for k, v in special_items.items():
             if k not in price_dict:
@@ -263,7 +279,7 @@ def load_price_master():
 PRICE_MASTER, SOURCE_INFO = load_price_master()
 
 # -------------------------------------------------------------
-# 3. CHUẨN HÓA VÀ TRA CỨU ĐÁ, DA, VÁN CHUẨN XÁC
+# 3. THUẬT TOÁN ĐỊNH DANH VẬT TƯ (CHỐNG NHẦM THÂN TỦ THÀNH ĐÁ)
 # -------------------------------------------------------------
 VALID_SECTIONS = [
     "I. VẬT TƯ THẦU PHỤ",
@@ -275,98 +291,111 @@ VALID_SECTIONS = [
     "VII. SOURCE NGOÀI"
 ]
 
+def resolve_material_master(section_code: str, raw_code: str, description: str, location: str, unit_hint: str):
+    sec = str(section_code).strip().upper()
+    loc_clean = str(location).strip().lower()
+    desc_clean = str(description).strip().lower()
+    full_text = loc_clean + " " + desc_clean
+    raw_c = str(raw_code).strip()
+
+    # 1. BẢO VỆ TUYỆT ĐỐI THÂN TỦ / HÔNG / ĐÁY / NÓC / VÁCH / ĐỢT (MỤC II - VÁN GỖ)
+    is_carcass = any(k in full_text for k in [
+        "thân tủ", "thùng tủ", "hông tủ", "đáy tủ", "nóc tủ", 
+        "vách khoang", "vách đứng", "đợt tủ", "đáy và nóc", "đáy & nóc",
+        "thùng vách", "vách phân chia", "đợt ngang", "đợt kệ", "khoang tủ"
+    ])
+
+    if is_carcass:
+        target_sec = "II. VẬT TƯ CHÍNH"
+        if "9mm" in full_text or "9 mm" in full_text or "hậu" in full_text:
+            m_code = "ANC.MEL.3.01"
+            cand = PRICE_MASTER.get(m_code, {"category": "VÁN", "name": "MDF thường E2 melamine nhóm A - 9mm", "unit": "m2", "unit_cost": 120000.0})
+            return target_sec, m_code, cand
+        else:
+            m_code = "ANC.MEL.3.03"
+            cand = PRICE_MASTER.get(m_code, {"category": "VÁN", "name": "MDF thường E2 melamine nhóm A - 17mm", "unit": "m2", "unit_cost": 165984.0})
+            return target_sec, m_code, cand
+
+    # 2. CÁNH KÍNH / GƯƠNG (MỤC VII - KÍNH CƯỜNG LỰC)
+    if any(k in full_text for k in ["cánh kính", "kính", "kinh", "gương", "cánh nhôm kính", "cánh tủ"]):
+        target_sec = "VII. SOURCE NGOÀI"
+        m_code = "KI.1.04"
+        cand = PRICE_MASTER.get(m_code, {"category": "SOURCE NGOÀI", "name": "Kính trong cường lực - 5 mm", "unit": "m2", "unit_cost": 1000000.0})
+        return target_sec, m_code, cand
+
+    # 3. HẬU TỦ BỌC DA (MỤC VII - DA TAM TÍNH)
+    if ("hậu" in full_text or "mặt sau" in full_text) and any(k in full_text for k in ["da", "leather", "bọc nệm", "mút"]):
+        target_sec = "VII. SOURCE NGOÀI"
+        m_code = "FB LE-01"
+        cand = PRICE_MASTER.get(m_code, {"category": "SOURCE NGOÀI", "name": "FB LE-01: Da tam tính (Hậu tủ bọc da)", "unit": "m2", "unit_cost": 500000.0})
+        return target_sec, m_code, cand
+
+    # 4. ĐÁ THẬT (MỤC VII - MẶT KỆ ĐÁ, VÁCH ĐÁ, LÍP MÒI)
+    has_real_stone = bool(re.search(r'(?:\b|\s|^)đá(?:\s|$|[,\.\-_])', full_text)) and "vân đá" not in full_text and "đáy" not in loc_clean
+    if has_real_stone or any(k in full_text for k in ["đá tam tính", "mặt bàn đá", "mặt kệ đá", "vách đá", "líp mòi"]):
+        target_sec = "VII. SOURCE NGOÀI"
+        m_code = "ST.01"
+        cand = PRICE_MASTER.get(m_code, {"category": "ĐÁ", "name": "ST-01: Đá tam tính", "unit": "m2", "unit_cost": 3000000.0})
+        return target_sec, m_code, cand
+
+    # 5. KHUNG SẮT GIA CỐ (MỤC II)
+    if any(k in full_text for k in ["sắt hộp", "khung sắt", "khung xương chịu lực", "hộp kẽm"]):
+        target_sec = "II. VẬT TƯ CHÍNH"
+        m_code = "SAT.1.05"
+        cand = PRICE_MASTER.get(m_code, {"category": "KIM LOẠI", "name": "Khung sắt hộp gia cố 20x40x1.2mm", "unit": "md", "unit_cost": 35000.0})
+        return target_sec, m_code, cand
+
+    # 6. LEN CHÂN (MỤC II)
+    if any(k in full_text for k in ["len chân", "chân tủ"]):
+        target_sec = "II. VẬT TƯ CHÍNH"
+        m_code = "VTK.1.10"
+        cand = PRICE_MASTER.get(m_code, {"category": "PHỤ KIỆN", "name": "VK - Len chân nhựa", "unit": "md", "unit_cost": 25000.0})
+        return target_sec, m_code, cand
+
+    # 7. THANH INOX LA PVD TREO ĐỢT (MỤC III)
+    if any(k in full_text for k in ["inox", "la pvd", "thanh treo"]):
+        target_sec = "III. HOÀN THIỆN (KIM LOẠI, PU...)"
+        m_code = "IN-DHX12"
+        cand = PRICE_MASTER.get(m_code, {"category": "KIM LOẠI", "name": "IN-DHX12: Thanh Inox La PVD treo đợt", "unit": "m2", "unit_cost": 3672000.0})
+        return target_sec, m_code, cand
+
+    # 8. BAO BÌ (MỤC V)
+    if any(k in full_text for k in ["bao bì", "màng pe", "carton", "bọc hàng", "đóng gói"]):
+        target_sec = "V. BAO BÌ"
+        m_code = "B.BBTN.1"
+        cand = PRICE_MASTER.get(m_code, {"category": "BAO BÌ", "name": "B.BBTN.1: Bao bì sản phẩm (Màng PE, carton)", "unit": "m2", "unit_cost": 25353.0})
+        return target_sec, m_code, cand
+
+    # 9. KHỚP MÃ MASTER TRỰC TIẾP
+    if raw_c in PRICE_MASTER:
+        return section_code, raw_c, PRICE_MASTER[raw_c]
+
+    return section_code, "CHƯA_CÓ_MÃ", None
+
 def clean_section_row(row):
     val = row.get('Mục chiết tính (I -> VII)')
     if val in VALID_SECTIONS:
         return val
 
     code = str(row.get('Code', '')).strip().upper()
+    loc = str(row.get('Vị trí', '')).strip().lower()
     name = str(row.get('Vật tư / Hạng mục', '')).strip().lower()
-    s = str(val).strip().upper() if pd.notna(val) else ""
+    full = loc + " " + name
 
-    if re.search(r'\bVII\b', s) or "SOURCE" in s:
-        return "VII. SOURCE NGOÀI"
-    elif re.search(r'\bVI\b', s) or "PHỤ KIỆN" in s:
-        return "VI. PHỤ KIỆN"
-    elif re.search(r'\bV\b', s) or "BAO BÌ" in s:
-        return "V. BAO BÌ"
-    elif re.search(r'\bIV\b', s) or "NHÂN CÔNG" in s:
-        return "IV. NHÂN CÔNG & VẬT LIỆU HOÀN THIỆN PHỤ"
-    elif re.search(r'\bIII\b', s) or "HOÀN THIỆN" in s:
-        return "III. HOÀN THIỆN (KIM LOẠI, PU...)"
-    elif re.search(r'\bI\b', s) and "THẦU" in s:
-        return "I. VẬT TƯ THẦU PHỤ"
-    elif re.search(r'\bII\b', s):
+    if any(k in full for k in ["thân tủ", "thùng tủ", "hông tủ", "đáy tủ", "nóc tủ", "vách khoang", "đợt tủ", "khung sắt", "len chân"]):
         return "II. VẬT TƯ CHÍNH"
-
-    if code.startswith("DA.") or code.startswith("ST.") or code.startswith("FB") or any(k in name for k in ["đá", "kính", "da", "leather", "bọc nệm"]):
+    if code.startswith("DA.") or code.startswith("ST.") or code.startswith("FB") or code.startswith("KI.") or any(k in full for k in ["kính", "da tam tính", "mặt kệ đá", "vách đá", "líp mòi"]):
         return "VII. SOURCE NGOÀI"
-    elif code.startswith("PK") or any(k in name for k in ["bản lề", "ray", "tay nắm", "khóa", "led", "đèn"]):
+    if code.startswith("PK") or any(k in full for k in ["bản lề", "ray", "tay nắm", "khóa", "led", "đèn"]):
         return "VI. PHỤ KIỆN"
-    elif code.startswith("BB") or any(k in name for k in ["bao bì", "pe", "carton"]):
+    if code.startswith("BB") or any(k in full for k in ["bao bì", "pe", "carton"]):
         return "V. BAO BÌ"
-    elif code.startswith("CC") or code.startswith("IN") or any(k in name for k in ["chỉ cạnh", "nẹp", "inox", "sơn", "pu"]):
+    if code.startswith("CC") or code.startswith("IN") or any(k in full for k in ["chỉ cạnh", "nẹp", "inox", "sơn", "pu"]):
         return "III. HOÀN THIỆN (KIM LOẠI, PU...)"
-    elif any(k in name for k in ["nhân công", "vật liệu phụ", "keo", "vít", "đinh"]):
+    if any(k in full for k in ["nhân công", "vật liệu phụ", "keo", "vít", "đinh"]):
         return "IV. NHÂN CÔNG & VẬT LIỆU HOÀN THIỆN PHỤ"
 
     return "II. VẬT TƯ CHÍNH"
-
-def find_master_by_name(description: str, section_code: str = ""):
-    desc_clean = str(description).strip().lower()
-    sec_up = str(section_code).upper()
-    if not desc_clean or desc_clean in ["none", "nan", ""]:
-        return None, None
-
-    # 1. Hạng mục DA bọc hậu tủ (Mục VII)
-    if "da" in desc_clean or "leather" in desc_clean or "nệm" in desc_clean:
-        if "FB LE-01" in PRICE_MASTER:
-            return "FB LE-01", PRICE_MASTER["FB LE-01"]
-
-    # 2. Hạng mục ĐÁ THẬT (Mục VII) - Tuyệt đối không lấy ván MDF vân đá
-    if "VII" in sec_up or any(k in desc_clean for k in ["đá", "stone", "mặt bàn đá", "vách đá", "líp mòi"]):
-        for p_code, p_data in PRICE_MASTER.items():
-            c_up = p_code.upper()
-            p_name_low = p_data["name"].lower()
-            if any(bad in p_name_low for bad in ["mdf", "mfc", "melamine", "laminate", "chỉ cạnh"]):
-                continue
-            if c_up.startswith("ST.") or c_up.startswith("DA.") or p_name_low.startswith("đá ") or "đá tam tính" in p_name_low:
-                return p_code, p_data
-
-    # 3. Hạng mục BAO BÌ (Mục V)
-    if "V. BAO BÌ" in sec_up or any(k in desc_clean for k in ["bao bì", "đóng gói", "bọc hàng", "carton", "màng pe"]):
-        for p_code, p_data in PRICE_MASTER.items():
-            c_up = p_code.upper()
-            p_name_low = p_data["name"].lower()
-            if c_up.startswith("PK."):
-                continue
-            if c_up.startswith("BB") or c_up.startswith("B.BB") or "bao bì" in p_name_low:
-                return p_code, p_data
-
-    # 4. Hạng mục ĐÈN LED (Mục VI)
-    if "led" in desc_clean or "đèn" in desc_clean:
-        for p_code, p_data in PRICE_MASTER.items():
-            if "led" in p_data["name"].lower() or "đèn" in p_data["name"].lower():
-                return p_code, p_data
-
-    words = [w for w in re.split(r'[,;\-\s_/\(\)\+]+', desc_clean) if len(w) >= 2]
-    best_code = None
-    best_data = None
-    best_score = 0
-
-    for p_code, p_data in PRICE_MASTER.items():
-        p_name_low = p_data["name"].lower()
-        score = sum(3 for w in words if w in p_name_low)
-        if desc_clean in p_name_low:
-            score += 5
-        if score > best_score:
-            best_score = score
-            best_code = p_code
-            best_data = p_data
-
-    if best_score >= 3 and best_data:
-        return best_code, best_data
-    return None, None
 
 @st.cache_data(ttl=600)
 def get_master_selection_options():
@@ -417,7 +446,7 @@ if not st.session_state['logged_in']:
     st.stop()
 
 # -------------------------------------------------------------
-# 5. CẤU TRÚC DỮ LIỆU KHÓA CHẶT 7 PHẦN (ĐÁ, DA, VÁN, ĐỢT)
+# 5. CẤU TRÚC DỮ LIỆU ĐỊNH NGHĨA PHÂN RÃ CẤU KIỆN
 # -------------------------------------------------------------
 class ChiTietVatTu(BaseModel):
     material_code: str
@@ -448,6 +477,10 @@ class TakeoffResult(BaseModel):
 user = st.session_state['user_info']
 
 with st.sidebar:
+    if LOGO_FILE:
+        st.image(LOGO_FILE, use_container_width=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+
     st.markdown(f"👤 **{user['full_name']}** (`{user['role']}`)")
     if st.button("Đăng xuất", use_container_width=True):
         logout()
@@ -465,7 +498,7 @@ with st.sidebar:
     leather_waste_rate = st.slider(
         "Hao hụt Da / Nệm bọc (%):", 
         0, 30, 10, 
-        help="Tỷ lệ hao hụt khi cắt khổ cuộn da và may múi quả trám trang trí"
+        help="Tỷ lệ hao hụt khi cắt khổ cuộn da và may múi trang trí"
     )
     
     st.caption(f"Nguồn dữ liệu: `{SOURCE_INFO}`")
@@ -493,7 +526,7 @@ with tab1:
         specs = st.text_area(
             "Quy cách kỹ thuật & Vật liệu chỉ định:",
             height=140, 
-            value="- Khung xương sắt hộp 20x40x1.2mm, Tấm nền MDF chống ẩm, Hệ đèn led sau tấm màn xuyên sáng.\n- Hệ kệ đợt treo: Thanh inox la treo 5x15mm mạ PVD, Đợt tủ gỗ hoàn thiện sơn màu chỉ định.\n- Hệ tủ dưới: Thùng vách MDF chống ẩm phủ Melamine/Laminate, Đợt tủ di động.\n- MẶT TỦ VÀ VÁCH TRANG TRÍ: Ốp đá tự nhiên/nung kết líp mòi 45 độ (ST.01 / Đá tam tính).\n- MẶT HẬU KHOANG RƯỢU: Ốp mút bọc DA TAM TÍNH (FB LE-01).\n- Cánh cửa nhôm kính, phụ kiện giảm chấn đồng bộ."
+            value="- THÂN TỦ & THÙNG VÁCH: MDF chống ẩm phủ Melamine 17mm (ANC.MEL.3.03), Hậu ván 9mm (ANC.MEL.3.01).\n- KHUNG GIA CỐ: Sắt hộp 20x40x1.2mm, Len chân nhựa 100mm.\n- HỆ KỆ TREO: Thanh inox la treo 5x15mm mạ PVD (IN-DHX12), đợt tủ gỗ hoàn thiện sơn màu chỉ định.\n- MẶT TỦ VÀ VÁCH TRANG TRÍ: Ốp đá tự nhiên/nung kết líp mòi 45 độ (ST.01 / Đá tam tính).\n- MẶT HẬU KHOANG RƯỢU: Ốp mút bọc DA TAM TÍNH (FB LE-01).\n- CÁNH TỦ: Cánh kính cường lực 5mm khung nhôm, phụ kiện giảm chấn đồng bộ."
         )
 
         submit_btn = st.button("🚀 Bắt đầu bóc tách & Tính chiết tính chi tiết", type="primary", use_container_width=True)
@@ -506,7 +539,7 @@ with tab1:
             elif not uploaded_files:
                 st.warning("Vui lòng tải lên ít nhất 1 ảnh bản vẽ kỹ thuật.")
             else:
-                with st.spinner("AI QS đang bóc tách phân rã chi tiết từng tấm (Bao gồm ĐÁ, DA & VÁN)..."):
+                with st.spinner("AI QS đang bóc tách phân rã chi tiết từng cấu kiện..."):
                     try:
                         client = genai.Client(api_key=api_key)
                         images = []
@@ -536,32 +569,31 @@ with tab1:
 
                         1. sec_1_thau_phu: Hạng mục gia công ngoài (nếu không có thì để []).
 
-                        2. sec_2_vat_tu_chinh: Phân rã từng tấm ván/khung sắt cụ thể:
-                           - Khung sắt gia cố: Dài x Rộng (m) x SL.
-                           - Ván MDF chống ẩm 17mm: Hông tủ, Đáy tủ, Nóc tủ, Vách ngăn đứng, Đợt kệ ngang (Dài x Rộng m x SL, ĐVT: m2, hao hụt: 20%).
-                           - Ván MDF chống ẩm 9mm: Hậu tủ (Dài x Rộng m x SL, ĐVT: m2, hao hụt: 20%).
-                           - Len chân tủ: Dài x Rộng m x SL.
+                        2. sec_2_vat_tu_chinh (BẮT BUỘC BÓC TẤM VÁN GỖ MDF CHO THÂN TỦ - TUYỆT ĐỐI KHÔNG BÓC THÂN TỦ LÀ ĐÁ):
+                           - Khung sắt gia cố: Dài x Rộng (m) x SL, description='Khung sắt hộp gia cố 20x40x1.2mm'.
+                           - Ván MDF chống ẩm 17mm: Hông tủ, Đáy và nóc tủ, Vách ngăn đứng, Đợt kệ ngang (Dài x Rộng m x SL, ĐVT: m2, hao hụt: 20%, description='MDF thường E2 melamine nhóm A - 17mm').
+                           - Ván MDF chống ẩm 9mm: Hậu tủ (Dài x Rộng m x SL, ĐVT: m2, hao hụt: 20%, description='MDF thường E2 melamine nhóm A - 9mm').
+                           - Len chân tủ: Dài x Rộng m x SL, description='VK - Len chân nhựa'.
 
                         3. sec_3_hoan_thien:
-                           - Thanh Inox La PVD treo đợt: Dài 1.21m x Rộng 0.047m x 4 thanh, ĐVT: m2, hao hụt: 5%.
+                           - Thanh Inox La PVD treo đợt: Dài 1.21m x Rộng 0.047m x 4 thanh, ĐVT: m2, hao hụt: 5%, description='IN-DHX12: Thanh Inox La PVD treo đợt'.
                            - Chỉ dán cạnh PVC: mét dài (md).
 
                         4. sec_4_nhan_cong: Nhân công thợ mộc sản xuất (công), Sơn PU hoàn thiện (m2), Gia công ép dán (m2), Phụ liệu keo vít (bộ).
 
-                        5. sec_5_bao_bi: BẮT BUỘC đặt description là "Bao bì sản phẩm (Không mút, không kiện gỗ)" (m2).
+                        5. sec_5_bao_bi: description='Bao bì sản phẩm (Không mút, không kiện gỗ)' (m2).
 
                         6. sec_6_phu_kien: Bản lề giảm chấn (cái), Ray trượt âm (bộ), Đèn LED ray nhôm định hình âm đợt tủ (md).
 
-                        7. sec_7_source_ngoai_da_kinh_da (BẮT BUỘC BÓC TÁCH ĐỦ ĐÁ, DA VÀ KÍNH):
-                           - Mặt kệ đá tủ dưới: description='ST-01: Đá tam tính', Dài 2.943m x Rộng 0.450m x 1 tấm, ĐVT: m2, hao hụt: 10%.
-                           - Vách đá trang trí: description='ST-01: Đá tam tính', Dài 1.760m x Rộng 0.450m x 2 tấm, ĐVT: m2, hao hụt: 10%.
-                           - Mặt đá nhỏ líp mòi 45 độ: description='ST-01: Đá tam tính', Dài 2.943m x Rộng 0.100m x 1 tấm, ĐVT: m2, hao hụt: 10%.
-                           - Mặt kệ đá trên: description='ST-01: Đá tam tính', Dài 2.943m x Rộng 0.450m x 1 tấm, ĐVT: m2, hao hụt: 10%.
-                           - Mặt hậu ốp da khoang rượu: description='FB LE-01: Da tam tính', Dài 1.056m x Rộng 2.600m x 1 tấm, ĐVT: m2, hao hụt: {leather_waste_rate}%.
-                           - Cánh kính tủ rượu hoặc kính cường lực (m2).
+                        7. sec_7_source_ngoai_da_kinh_da (CHỈ BÓC TÁCH ĐÁ, DA VÀ KÍNH CƯỜNG LỰC - TUYỆT ĐỐI KHÔNG ĐƯỢC ĐƯA THÂN TỦ VÀO ĐÂY):
+                           - Mặt kệ đá tủ dưới: description='ST-01: Đá tam tính', location='Mặt kệ tủ dưới', Dài 2.943m x Rộng 0.450m x 1 tấm, ĐVT: m2, hao hụt: 10%.
+                           - Vách đá trang trí: description='ST-01: Đá tam tính', location='Vách trang trí', Dài 1.760m x Rộng 0.450m x 2 tấm, ĐVT: m2, hao hụt: 10%.
+                           - Mặt đá nhỏ líp mòi 45 độ: description='ST-01: Đá tam tính', location='Líp mòi đá 45 độ', Dài 2.943m x Rộng 0.100m x 1 tấm, ĐVT: m2, hao hụt: 10%.
+                           - Mặt kệ đá trên: description='ST-01: Đá tam tính', location='Mặt kệ trên', Dài 2.943m x Rộng 0.450m x 1 tấm, ĐVT: m2, hao hụt: 10%.
+                           - Mặt hậu ốp da khoang rượu: description='FB LE-01: Da tam tính', location='Hậu bọc da khoang rượu', Dài 1.056m x Rộng 2.600m x 1 tấm, ĐVT: m2, hao hụt: {leather_waste_rate}%.
+                           - Cánh kính tủ rượu: description='Kính trong cường lực - 5 mm', location='Cánh kính tủ rượu', Dài 1.682m x Rộng 0.510m x 4 cánh, ĐVT: m2, hao hụt: 5%.
                         """
 
-                        # CẤU HÌNH CỐ ĐỊNH 2 MÔ HÌNH: 3.8 FLASH & 3.5 FLASH LITE
                         MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-3.5-flash-lite']
                         response = None
                         last_err = None
@@ -573,7 +605,7 @@ with tab1:
                                         model=current_model,
                                         contents=[*images, prompt],
                                         config=types.GenerateContentConfig(
-                                            system_instruction="BẠN LÀ SENIOR QS NỘI THẤT. Bóc tách chi tiết từng cấu kiện hình học theo Cutting List, bóc tách đầy đủ cả Đá, Da và Ván.",
+                                            system_instruction="BẠN LÀ SENIOR QS NỘI THẤT. Bóc tách chi tiết từng cấu kiện hình học theo Cutting List, phân định rõ ràng Thân tủ ván gỗ và Mặt kệ Đá.",
                                             response_mime_type="application/json",
                                             response_schema=TakeoffResult,
                                             temperature=0.0
@@ -632,13 +664,7 @@ with tab1:
                                 else:
                                     net_q = round(sl, 2)
 
-                                matched_code, item_info = None, None
-                                if "VII" in s_code or "da" in ai_desc.lower() or "đá" in ai_desc.lower():
-                                    matched_code, item_info = find_master_by_name(ai_desc, s_code)
-                                elif raw_code in PRICE_MASTER and not any(k in raw_code.upper() for k in ["BT.MEL", "ANC", "MDF"]):
-                                    matched_code, item_info = raw_code, PRICE_MASTER[raw_code]
-                                else:
-                                    matched_code, item_info = find_master_by_name(ai_desc, s_code)
+                                final_sec, matched_code, item_info = resolve_material_master(s_code, raw_code, ai_desc, loc, unit_str)
 
                                 if item_info:
                                     u_cost = item_info["unit_cost"]
@@ -665,7 +691,7 @@ with tab1:
                                 formula_text = f"{gross_q:.2f} x {u_cost:,.0f} đ"
 
                                 boq_records.append({
-                                    "section_code": s_code,
+                                    "section_code": final_sec,
                                     "material_code": matched_code,
                                     "description": final_desc,
                                     "location": loc,
@@ -723,10 +749,10 @@ with tab1:
                         m2.metric(f"Chi phí chung ({overhead_rate}%)", f"{overhead_amt:,.0f} đ")
                         m3.metric(f"Giá chào thầu ({profit_rate}%)", f"{tender_amt:,.0f} đ")
 
-                        stone_records = [r for r in boq_records if "VII" in r["section_code"]]
+                        stone_records = [r for r in boq_records if "VII" in r["section_code"] and "ST.01" in r["material_code"]]
                         if stone_records:
                             stone_cost = sum(r["amount"] for r in stone_records)
-                            st.info(f"💎 **Đã bóc tách mục VII. SOURCE NGOÀI (Đá, Da & Kính):** {len(stone_records)} hạng mục, thành tiền: **{stone_cost:,.0f} đ**.")
+                            st.info(f"💎 **Mặt kệ đá & Vách đá (Mục VII):** {len(stone_records)} tấm đá, thành tiền: **{stone_cost:,.0f} đ**.")
 
                     except Exception as e:
                         st.error(f"Lỗi xử lý: {str(e)}")
@@ -856,37 +882,8 @@ with tab2:
                 FROM boq_items WHERE project_id = ?""",
                 conn, params=(sel_id,)
             )
-            # Tự động chuẩn hóa và nhận diện chính xác đá, da, bao bì
-            for idx in df_init.index:
-                sec_val = str(df_init.at[idx, 'Mục chiết tính (I -> VII)'])
-                desc_val = str(df_init.at[idx, 'Vật tư / Hạng mục'])
-                
-                # Khắc phục đá bị gán nhầm ván MDF vân đá
-                if "VII" in sec_val and ("mdf" in desc_val.lower() or "vân đá" in desc_val.lower()):
-                    if "ST.01" in PRICE_MASTER:
-                        df_init.at[idx, 'Code'] = "ST.01"
-                        df_init.at[idx, 'Vật tư / Hạng mục'] = PRICE_MASTER["ST.01"]["name"]
-                        df_init.at[idx, 'ĐVT'] = PRICE_MASTER["ST.01"]["unit"]
-                        df_init.at[idx, 'Đơn giá'] = PRICE_MASTER["ST.01"]["unit_cost"]
-                        gross_v = float(df_init.at[idx, 'KL Tổng (Gross)'] or 1.0)
-                        df_init.at[idx, 'Thành tiền'] = round(gross_v * PRICE_MASTER["ST.01"]["unit_cost"], 0)
-                
-                # Khắc phục bao bì bị gán nhầm bản lề
-                if "V. BAO BÌ" in sec_val and "bản lề" in desc_val.lower():
-                    if "B.BBTN.1" in PRICE_MASTER:
-                        df_init.at[idx, 'Code'] = "B.BBTN.1"
-                        df_init.at[idx, 'Vật tư / Hạng mục'] = PRICE_MASTER["B.BBTN.1"]["name"]
-                        df_init.at[idx, 'ĐVT'] = PRICE_MASTER["B.BBTN.1"]["unit"]
-                        df_init.at[idx, 'Đơn giá'] = PRICE_MASTER["B.BBTN.1"]["unit_cost"]
-                        gross_v = float(df_init.at[idx, 'KL Tổng (Gross)'] or 1.0)
-                        df_init.at[idx, 'Thành tiền'] = round(gross_v * PRICE_MASTER["B.BBTN.1"]["unit_cost"], 0)
-
             df_init['Mục chiết tính (I -> VII)'] = df_init.apply(clean_section_row, axis=1)
             st.session_state[state_key] = df_init
-
-        zero_rows = st.session_state[state_key][st.session_state[state_key]['Đơn giá'] == 0.0]
-        if not zero_rows.empty:
-            st.warning(f"⚠️ Hồ sơ này có **{len(zero_rows)}** hạng mục chưa có Đơn giá (0 đ). Hãy dùng công cụ gợi ý bên dưới hoặc bấm nút '🔍 Tự Động Khắc Phục Đá & Tìm Giá Theo Tên' để điền giá!")
 
         # CÔNG CỤ GỢI Ý & TÌM KIẾM NHANH VẬT TƯ MASTER
         with st.expander("💡 **CÔNG CỤ GỢI Ý & TÌM KIẾM VẬT TƯ MASTER (Gõ tên để chọn, không cần nhớ mã code)**", expanded=True):
@@ -906,7 +903,7 @@ with tab2:
                     for idx in st.session_state[state_key].index
                 ]
                 row_options.append("➕ Thêm thành dòng mới vào cuối bảng")
-                target_row_str = st.selectbox("Chọn dòng muốn điền vào:", row_options, index=len(row_options)-1 if not zero_rows.empty else 0)
+                target_row_str = st.selectbox("Chọn dòng muốn điền vào:", row_options, index=len(row_options)-1)
 
             with c_sug3:
                 st.write("")
@@ -914,7 +911,7 @@ with tab2:
                 if st.button("✅ Áp dụng vào dòng đã chọn", type="primary", use_container_width=True):
                     chosen_code = code_map[selected_item_label]
                     chosen_data = PRICE_MASTER[chosen_code]
-                    auto_sec = clean_section_row({'Mục chiết tính (I -> VII)': '', 'Code': chosen_code, 'Vật tư / Hạng mục': chosen_data["name"]})
+                    auto_sec = clean_section_row({'Mục chiết tính (I -> VII)': '', 'Code': chosen_code, 'Vị trí': '', 'Vật tư / Hạng mục': chosen_data["name"]})
 
                     if "➕ Thêm thành dòng mới" in target_row_str:
                         is_da_leather = "da" in chosen_data["name"].lower() and "đá" not in chosen_data["name"].lower()
@@ -929,7 +926,7 @@ with tab2:
                             "Mục chiết tính (I -> VII)": auto_sec,
                             "Code": chosen_code,
                             "Vật tư / Hạng mục": chosen_data["name"],
-                            "Vị trí": "Hậu tủ kính" if is_da_leather else "Mặt kệ / Vách theo thiết kế",
+                            "Vị trí": "Hậu tủ kính" if is_da_leather else ("Mặt kệ / Vách đá" if is_stone else "Theo thiết kế"),
                             "Dài (m)": 1.056 if is_da_leather else (2.943 if is_stone else 1.0),
                             "Rộng (m)": 2.600 if is_da_leather else (0.450 if is_stone else 1.0),
                             "Cao (m)": 0.0,
@@ -991,46 +988,36 @@ with tab2:
 
         c_tool1, c_tool2, c_tool3 = st.columns([2.4, 1.8, 1.8])
         with c_tool1:
-            if st.button("🔍 Tự Động Khắc Phục Đá & Tìm Giá Theo Tên", use_container_width=True):
+            if st.button("🔍 Khôi Phục Thân Tủ MDF & Chuẩn Hóa Đá", use_container_width=True):
                 updated_df = edited_df.copy()
                 match_count = 0
                 for idx in updated_df.index:
                     desc_val = str(updated_df.at[idx, 'Vật tư / Hạng mục']).strip()
                     code_val = str(updated_df.at[idx, 'Code']).strip()
+                    loc_val = str(updated_df.at[idx, 'Vị trí']).strip()
                     sec_val = str(updated_df.at[idx, 'Mục chiết tính (I -> VII)']).strip()
                     cost_val = float(updated_df.at[idx, 'Đơn giá'] or 0.0)
 
-                    # Khắc phục ván MDF 'vân đá' ở mục VII thành Đá thật
-                    if "VII" in sec_val and ("mdf" in desc_val.lower() or "vân đá" in desc_val.lower()):
-                        found_code, master_item = find_master_by_name("đá", "VII. SOURCE NGOÀI")
-                        if master_item:
-                            updated_df.at[idx, 'Code'] = found_code
-                            updated_df.at[idx, 'Vật tư / Hạng mục'] = master_item['name']
-                            updated_df.at[idx, 'ĐVT'] = master_item['unit']
-                            updated_df.at[idx, 'Đơn giá'] = master_item['unit_cost']
-                            net_q = float(updated_df.at[idx, 'KL Tịnh (Net)'] or 1.0)
-                            w_pct = float(updated_df.at[idx, '% Hao hụt'] or 10.0)
-                            gross_q = round(net_q * (1 + w_pct / 100.0), 3)
-                            updated_df.at[idx, 'KL Tổng (Gross)'] = gross_q
-                            updated_df.at[idx, 'Thành tiền'] = round(gross_q * master_item['unit_cost'], 0)
-                            match_count += 1
-                    elif cost_val == 0.0 or code_val in ["CHƯA_CÓ_MÃ", "None", "nan", ""]:
-                        found_code, master_item = find_master_by_name(desc_val, sec_val)
-                        if master_item:
-                            updated_df.at[idx, 'Code'] = found_code
-                            updated_df.at[idx, 'Vật tư / Hạng mục'] = master_item['name']
-                            updated_df.at[idx, 'ĐVT'] = master_item['unit']
-                            updated_df.at[idx, 'Đơn giá'] = master_item['unit_cost']
-                            net_q = float(updated_df.at[idx, 'KL Tịnh (Net)'] or 1.0)
-                            w_pct = float(updated_df.at[idx, '% Hao hụt'] or 5.0)
-                            gross_q = round(net_q * (1 + w_pct / 100.0), 3)
-                            updated_df.at[idx, 'KL Tổng (Gross)'] = gross_q
-                            updated_df.at[idx, 'Thành tiền'] = round(gross_q * master_item['unit_cost'], 0)
-                            match_count += 1
+                    target_sec, found_code, master_item = resolve_material_master(sec_val, code_val, desc_val, loc_val, str(updated_df.at[idx, 'ĐVT']))
+                    
+                    if master_item and (cost_val == 0.0 or code_val != found_code or sec_val != target_sec):
+                        updated_df.at[idx, 'Mục chiết tính (I -> VII)'] = target_sec
+                        updated_df.at[idx, 'Code'] = found_code
+                        updated_df.at[idx, 'Vật tư / Hạng mục'] = master_item['name']
+                        updated_df.at[idx, 'ĐVT'] = master_item['unit']
+                        updated_df.at[idx, 'Đơn giá'] = master_item['unit_cost']
+                        
+                        net_q = float(updated_df.at[idx, 'KL Tịnh (Net)'] or 1.0)
+                        w_pct = float(updated_df.at[idx, '% Hao hụt'] or (20.0 if "II" in target_sec else 10.0))
+                        updated_df.at[idx, '% Hao hụt'] = w_pct
+                        gross_q = round(net_q * (1 + w_pct / 100.0), 3)
+                        updated_df.at[idx, 'KL Tổng (Gross)'] = gross_q
+                        updated_df.at[idx, 'Thành tiền'] = round(gross_q * master_item['unit_cost'], 0)
+                        match_count += 1
                 
                 updated_df['Mục chiết tính (I -> VII)'] = updated_df.apply(clean_section_row, axis=1)
                 st.session_state[state_key] = updated_df
-                st.success(f"✅ Đã khắc phục và khôi phục đơn giá cho {match_count} hạng mục!")
+                st.success(f"✅ Đã khôi phục chuẩn xác thân tủ MDF và tách bạch Đá cho {match_count} cấu kiện!")
                 st.rerun()
 
         with c_tool2:
@@ -1067,8 +1054,8 @@ with tab2:
                     w_pct = float(row['% Hao hụt']) if pd.notna(row['% Hao hụt']) else 0.0
                     u_cost = float(row['Đơn giá']) if pd.notna(row['Đơn giá']) else 0.0
                     
-                    if "VII" in s_code and ("mdf" in desc.lower() or "vân đá" in desc.lower()):
-                        f_code, f_item = find_master_by_name("đá", s_code)
+                    if u_cost == 0.0 or m_code in ["CHƯA_CÓ_MÃ", "None", "nan", ""]:
+                        _, f_code, f_item = resolve_material_master(s_code, m_code, desc, loc, unit)
                         if f_item:
                             m_code = f_code
                             desc = f_item['name']

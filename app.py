@@ -55,6 +55,15 @@ def get_vietnam_time():
     tz_vn = timezone(timedelta(hours=7))
     return datetime.now(tz_vn).strftime("%Y-%m-%d %H:%M:%S")
 
+def parse_dimensions(dim_str: str):
+    """Tách kích thước Dài, Sâu, Cao (mm) từ chuỗi kích thước của người dùng"""
+    nums = re.findall(r'\d+', str(dim_str).replace('.', '').replace(',', ''))
+    if len(nums) >= 3:
+        return float(nums[0]), float(nums[1]), float(nums[2])
+    elif len(nums) == 2:
+        return float(nums[0]), 0.0, float(nums[1])
+    return 2000.0, 450.0, 2000.0
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -245,33 +254,28 @@ STOPWORDS_VN = {
 }
 
 def is_code_allowed_for_section(section_code: str, p_code: str, p_name: str) -> bool:
-    """Kiểm tra mã Master có thuộc đúng phân nhóm chiết tính I -> VII hay không"""
     sec = section_code.upper()
     c_up = p_code.upper()
     n_low = p_name.lower()
 
-    # Tuyệt đối không lấy mã lắp đặt (LĐ - ...) hoặc mã chỉ có 1 ký tự rời rạc cho các mục vật tư
     is_install_or_labor = n_low.startswith("lđ -") or n_low.startswith("lđ-") or "nhân công" in n_low or "lắp đặt" in n_low
     is_edge_banding = c_up.startswith("CC") or n_low.startswith("cc -") or "chỉ cạnh" in n_low or "chỉ nhựa" in n_low or "chỉ pvc" in n_low
     is_stone = c_up.startswith("DA.") or c_up.startswith("ST.") or n_low.startswith("đá ")
     is_glass = c_up.startswith("KI.") or n_low.startswith("kính ") or n_low.startswith("gương ")
 
     if "II. VẬT TƯ CHÍNH" in sec:
-        # Vật tư chính chỉ lấy Gỗ, Ván MDF/MFC/Plywood/HDF/Gỗ ghép/Tấm nhựa/Cemboard
         if is_install_or_labor or is_edge_banding or is_stone or is_glass:
             return False
-        if len(c_up) <= 2:  # Loại bỏ mã rác 'y', 'x'
+        if len(c_up) <= 2:
             return False
         return any(k in n_low for k in ["mdf", "mfc", "hdf", "plywood", "gỗ", "ván", "melamine", "laminate", "veneer", "acrylic", "pvc", "cemboard"])
 
     elif "III. HOÀN THIỆN" in sec:
-        # Hoàn thiện: Chỉ cạnh (CC), Inox, Kim loại, Nhôm, Sơn PU
         if is_install_or_labor or is_stone or is_glass:
             return False
         return is_edge_banding or any(k in n_low for k in ["inox", "nhôm", "sắt", "kim loại", "sơn", "pu", "pvd", "nẹp", "chỉ"])
 
     elif "IV. NHÂN CÔNG" in sec:
-        # Nhân công & hoàn thiện phụ: Nhân công, sơn, dán phủ, keo vít
         if is_stone or is_glass:
             return False
         return is_install_or_labor or any(k in n_low for k in ["nhân công", "sản xuất", "sơn", "laminate", "veneer", "keo", "phụ liệu", "vít", "công"])
@@ -285,60 +289,49 @@ def is_code_allowed_for_section(section_code: str, p_code: str, p_name: str) -> 
         return any(k in n_low for k in ["bản lề", "ray", "tay nắm", "khóa", "phụ kiện", "đèn", "led", "hafele", "blum", "ivan", "chốt", "bas", "cam"]) or c_up.startswith("PK")
 
     elif "VII. SOURCE NGOÀI" in sec:
-        # Source ngoài: Đá, Kính, Gương, Màng căng
         return is_stone or is_glass or any(k in n_low for k in ["đá", "kính", "gương", "màng căng", "xuyên sáng", "nệm", "da"])
 
     return True
 
 def smart_match_master(section_code: str, raw_code: str, description: str, unit_hint: str):
-    """Tìm mã vật tư chính xác theo phân nhóm, từ khóa cốt lõi và độ dày"""
     raw_c = str(raw_code).strip()
     desc_low = str(description).lower().strip()
 
-    # 1. Nếu mã AI trả về có trong PRICE_MASTER và hợp lệ với nhóm Section -> Dùng ngay
     if raw_c in PRICE_MASTER:
         cand = PRICE_MASTER[raw_c]
         if is_code_allowed_for_section(section_code, raw_c, cand["name"]):
             return raw_c, cand
 
-    # 2. Tách các thông số kỹ thuật quan trọng từ mô tả của AI (ví dụ: độ dày 17mm, 9mm, 18mm, 5mm)
     thickness_matches = re.findall(r'(\d+(?:\.\d+)?)\s*(?:mm|ly|li)', desc_low)
-    
-    # Tách từ khóa có nghĩa (loại bỏ stopwords)
     words = [w for w in re.split(r'[,;\-\s_/\(\)\+]+', desc_low) if len(w) >= 2 and w not in STOPWORDS_VN]
 
     best_code = None
     best_data = None
     best_score = 0.0
 
-    # Từ khóa vật liệu cốt lõi có trọng số cao (+3 điểm)
     CORE_MATERIALS = {"mdf", "mfc", "plywood", "melamine", "laminate", "veneer", "acrylic", "sồi", "oak", "tần", "ash", "óc", "walnut", "inox", "pvd", "kính", "gương", "đá", "pu", "chống", "ẩm", "mmr", "lbr"}
 
     for p_code, p_data in PRICE_MASTER.items():
         p_name_low = p_data["name"].lower()
 
-        # Bước lọc 1: Phải đúng nhóm Section (I -> VII)
         if not is_code_allowed_for_section(section_code, p_code, p_name_low):
             continue
 
         score = 0.0
         p_tokens = set(re.split(r'[,;\-\s_/\(\)\+]+', p_name_low))
 
-        # Bước lọc 2: So khớp từng từ độc lập
         for w in words:
             if w in p_tokens:
                 score += 3.0 if w in CORE_MATERIALS else 1.5
             elif len(w) >= 4 and w in p_name_low:
                 score += 1.0
 
-        # Bước lọc 3: Thưởng điểm lớn nếu khớp đúng độ dày (ví dụ: 17mm, 9mm, 5mm)
         for th in thickness_matches:
             if f"{th}mm" in p_name_low.replace(" ", "") or f"- {th}" in p_name_low or f" {th} " in p_name_low:
                 score += 4.0
             else:
-                score -= 1.5  # Phạt nếu lệch độ dày
+                score -= 1.5
 
-        # Bước lọc 4: Khớp đơn vị tính
         if unit_hint and unit_hint.lower() == p_data["unit"].lower():
             score += 1.0
 
@@ -347,7 +340,6 @@ def smart_match_master(section_code: str, raw_code: str, description: str, unit_
             best_code = p_code
             best_data = p_data
 
-    # Ngưỡng an toàn: Phải đạt ít nhất 4.0 điểm (ít nhất 1 từ khóa cốt lõi + 1 thuộc tính phụ/độ dày)
     if best_score >= 4.0 and best_data:
         return best_code, best_data
 
@@ -443,9 +435,9 @@ with tab1:
     with c1:
         st.subheader("1. Dữ liệu bản vẽ & Thông số kỹ thuật")
         project_name = st.text_input("Tên dự án / Công trình:", value="Biệt thự Park City")
-        item_code = st.text_input("Mã sản phẩm / Hạng mục:", value="SP10")
-        item_name = st.text_input("Tên sản phẩm:", value="Tủ pantry khung gỗ đợt gỗ hoàn thiện")
-        dimensions = st.text_input("Kích thước bao (DxRxC mm):", value="2600 x 600 x 2250 mm")
+        item_code = st.text_input("Mã sản phẩm / Hạng mục:", value="SP12")
+        item_name = st.text_input("Tên sản phẩm:", value="Tủ rượu")
+        dimensions = st.text_input("Kích thước bao (DxRxC mm):", value="4095 x 450 x 2600 mm")
         
         uploaded_files = st.file_uploader("Upload ảnh 3D hoặc bản vẽ kỹ thuật:", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
         if uploaded_files:
@@ -457,7 +449,7 @@ with tab1:
         specs = st.text_area(
             "Quy cách kỹ thuật & Vật liệu chỉ định:",
             height=130, 
-            value="- Khung gỗ tự nhiên hoàn thiện sơn màu chỉ định.\n- Vách và đợt tủ gỗ hoàn thiện theo mẫu.\n- Hệ tủ dưới: Thùng vách MDF chống ẩm phủ Melamine 17mm, hậu 9mm.\n- Mặt tủ ốp đá tự nhiên/nung kết líp mòi.\n- Hệ tay nắm nhôm Hafele, bản lề giảm chấn và ray âm giảm chấn."
+            value="- Thùng vách: MDF chống ẩm phủ Melamine 17mm, hậu 9mm.\n- Cánh kính khung nhôm cao cấp màu xám khói, bản lề giảm chấn cánh kính.\n- Đợt kệ để rượu gỗ công nghiệp kết hợp dải đèn LED thanh nhôm định hình.\n- Phụ kiện & liên kết đồng bộ theo thiết kế."
         )
 
         submit_btn = st.button("🚀 Bắt đầu bóc tách & Tính chiết tính", type="primary", use_container_width=True)
@@ -470,7 +462,7 @@ with tab1:
             elif not uploaded_files:
                 st.warning("Vui lòng tải lên ít nhất 1 ảnh bản vẽ kỹ thuật.")
             else:
-                with st.spinner("AI QS đang bóc tách chiết tính theo chuẩn 7 phần (I -> VII)..."):
+                with st.spinner("AI QS đang bóc tách hình học và khống chế hạn mức trần diện tích..."):
                     try:
                         client = genai.Client(api_key=api_key)
                         images = []
@@ -483,27 +475,38 @@ with tab1:
                             img.save(spath)
                             saved_paths.append(spath)
 
+                        # TÍNH TOÁN BẢO TOÀN DIỆN TÍCH HÌNH HỌC (SANITY BOUNDS)
+                        l_mm, d_mm, h_mm = parse_dimensions(dimensions)
+                        s_front = round((l_mm * h_mm) / 1_000_000.0, 2)
+                        s_thung_max = round(s_front * 2.5, 2)
+                        s_hau_max = round(s_front * 1.0, 2)
+
                         prompt = f"""
                         BẠN LÀ SENIOR QS NỘI THẤT. BÓC TÁCH KHỐI LƯỢNG KỸ THUẬT VÀ CHIẾT TÍNH ĐÚNG CẤU TRÚC TỪ I ĐẾN VII:
                         - Mã hiệu sản phẩm: {item_code}
                         - Tên sản phẩm: {item_name}
-                        - Kích thước bao (DxRxC mm): {dimensions}
+                        - Kích thước phủ bì cố định: Dài {l_mm:.0f}mm x Sâu {d_mm:.0f}mm x Cao {h_mm:.0f}mm.
                         - Quy cách vật liệu:
                         {specs}
 
-                        QUY ĐỊNH PHÂN NHÓM NGHIÊM NGẶT (KHÔNG ĐƯỢC XẾP NHẦM NHÓM):
-                        - I. VẬT TƯ THẦU PHỤ: Chỉ gồm các hạng mục thuê gia công trọn gói bên ngoài (nếu không có thì để trống).
-                        - II. VẬT TƯ CHÍNH: Chỉ gồm Ván MDF/MFC/Plywood/Gỗ tự nhiên làm thùng, vách, đợt, hậu, cánh, khung xương gỗ. Ghi rõ tên vật tư kèm độ dày (ví dụ: 'MDF chống ẩm phủ Melamine 17mm', 'MDF chống ẩm phủ Melamine 9mm', 'Plywood chống ẩm 18mm'). TUYỆT ĐỐI KHÔNG đưa nhân công lắp đặt, đá, kính vào mục II.
-                        - III. HOÀN THIỆN (KIM LOẠI, PU...): Chỉ gồm Chỉ dán cạnh PVC/Veneer (md), Nẹp Inox PVD, Thanh nhôm định hình.
-                        - IV. NHÂN CÔNG & VẬT LIỆU HOÀN THIỆN PHỤ: Chỉ gồm Nhân công sản xuất/lắp đặt, Sơn PU hoàn thiện (m2), Gia công dán Laminate/Veneer, Phụ liệu keo vít.
-                        - V. BAO BÌ: Màng PE, xốp nổ, bìa carton bọc hàng (m2).
-                        - VI. PHỤ KIỆN: Bản lề giảm chấn (cái), Ray trượt ngăn kéo (bộ), Tay nắm (cái), Đèn LED.
-                        - VII. SOURCE NGOÀI: Đá mặt bàn/vách đá (m2), Kính cường lực/Gương (m2), Màng căng xuyên sáng (m2).
+                        QUY TẮC KHỐNG CHẾ TRẦN KHỐI LƯỢNG BẮT BUỘC (SANITY BOUNDS - CHỐNG THỔI PHỒNG DIỆN TÍCH):
+                        - Diện tích mặt đứng hình học: {s_front:.2f} m2.
+                        - TỔNG diện tích ván thùng, vách đứng, đợt ngang 17mm (Mục II) TUYỆT ĐỐI KHÔNG VƯỢT QUÁ: {s_thung_max:.2f} m2.
+                        - TỔNG diện tích ván hậu tủ 9mm (Mục II) TUYỆT ĐỐI KHÔNG VƯỢT QUÁ: {s_hau_max:.2f} m2.
+                        - TỔNG diện tích cánh tủ / cánh kính (Mục II hoặc VII) TUYỆT ĐỐI KHÔNG VƯỢT QUÁ: {s_front:.2f} m2.
+                        Nghiêm cấm tính trùng lặp cùng một khoang tủ/đợt nhiều lần!
 
-                        Trong trường `description`, phải ghi TÊN CHỦNG LOẠI VẬT TƯ chuẩn xác (kèm độ dày mm), còn vị trí lắp đặt ghi riêng vào trường `location`.
+                        QUY ĐỊNH PHÂN NHÓM 7 MỤC (TÊN section_code PHẢI CHÍNH XÁC):
+                        - I. VẬT TƯ THẦU PHỤ: Hạng mục gia công trọn gói bên ngoài (nếu không có thì để trống).
+                        - II. VẬT TƯ CHÍNH: Chỉ gồm Ván MDF/MFC/Plywood/Gỗ tự nhiên làm thùng, vách, đợt, hậu, cánh. Ghi rõ tên vật tư kèm độ dày (ví dụ: 'MDF chống ẩm Melamine 17mm', 'MDF chống ẩm Melamine 9mm'). TUYỆT ĐỐI KHÔNG đưa nhân công lắp đặt, đá, kính vào mục II.
+                        - III. HOÀN THIỆN (KIM LOẠI, PU...): Chỉ gồm Chỉ dán cạnh PVC/Veneer (md), Nẹp Inox PVD, Khung nhôm định hình.
+                        - IV. NHÂN CÔNG & VẬT LIỆU HOÀN THIỆN PHỤ: Nhân công sản xuất, Sơn PU hoàn thiện, Gia công dán phủ, Keo vít.
+                        - V. BAO BÌ: Màng PE, xốp nổ, bìa carton bọc hàng (m2).
+                        - VI. PHỤ KIỆN: Bản lề giảm chấn (cái), Ray trượt âm (bộ), Tay nắm (cái), Đèn LED ray nhôm (md).
+                        - VII. SOURCE NGOÀI: Cánh kính khung nhôm/kính cường lực (m2), Đá tự nhiên/nung kết (m2), Gương kính.
                         """
 
-                        MODELS_TO_TRY = ['gemini-3.8-flash','gemini-3.5-flash-lite','gemini-2.5-flash', 'gemini-1.5-flash']
+                        MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-3.1-pro']
                         response = None
                         last_err = None
 
@@ -514,7 +517,7 @@ with tab1:
                                         model=current_model,
                                         contents=[*images, prompt],
                                         config=types.GenerateContentConfig(
-                                            system_instruction="BẠN LÀ CHUYÊN GIA SENIOR QS NỘI THẤT. Bóc tách chiết tính đúng 7 phần I -> VII, đặt tên vật tư chuẩn xác kèm độ dày mm.",
+                                            system_instruction="BẠN LÀ CHUYÊN GIA SENIOR QS NỘI THẤT. Bóc tách chiết tính chuẩn xác, tuân thủ đúng trần diện tích hình học.",
                                             response_mime_type="application/json",
                                             response_schema=TakeoffResult,
                                             temperature=0.0
@@ -524,7 +527,9 @@ with tab1:
                                 except Exception as err:
                                     last_err = err
                                     err_str = str(err)
-                                    if any(k in err_str for k in ["503", "UNAVAILABLE", "429"]):
+                                    if "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                                        break
+                                    elif any(k in err_str for k in ["503", "UNAVAILABLE"]):
                                         time.sleep(2 * (attempt + 1))
                                     else:
                                         break
@@ -546,7 +551,6 @@ with tab1:
                                 loc = comp.get("location", "").strip()
                                 unit_str = str(comp.get("unit", "cái")).strip()
                                 
-                                # Tra cứu thông minh có kiểm soát phân nhóm Section
                                 matched_code, item_info = smart_match_master(s_code, raw_code, ai_desc, unit_str)
 
                                 if item_info:
@@ -555,7 +559,7 @@ with tab1:
                                     final_unit = item_info["unit"]
                                 else:
                                     u_cost = 0.0
-                                    final_desc = ai_desc  # Giữ nguyên mô tả chuẩn của AI để QS dễ nhìn
+                                    final_desc = ai_desc
                                     final_unit = unit_str
 
                                 net_q = float(comp.get("net_quantity", 0.0))
@@ -629,11 +633,15 @@ with tab1:
                         m2.metric(f"Chi phí chung ({overhead_rate}%)", f"{overhead_amt:,.0f} đ")
                         m3.metric(f"Giá chào thầu ({profit_rate}%)", f"{tender_amt:,.0f} đ")
 
+                        # CẢNH BÁO NẾU CÓ DÒNG ĐƠN GIÁ BẰNG 0
+                        zero_items = [r for r in boq_records if r["unit_cost"] == 0.0]
+                        if zero_items:
+                            st.warning(f"⚠️ **Lưu ý QS:** Có **{len(zero_items)}** hạng mục chưa có mã Master (đang tính 0 đ) khiến tổng giá cost bị giảm: " + 
+                                       ", ".join([f"`{x['description']}`" for x in zero_items[:3]]) + "... Vui lòng sang tab 2 để cập nhật mã Code.")
+
                         st.markdown("⚠️ **Lưu ý kỹ thuật & Cảnh báo gia công:**")
                         for rsk in data.get("technical_risks_and_notes", []):
                             st.info(f"• {rsk}")
-
-                        st.info("💡 Chuyển sang tab **'📂 Thư Viện Hồ Sơ & Chỉnh Sửa Chiết Tính'** để xem, đổi mã code tự động dò master hoặc chỉnh sửa số liệu.")
 
                     except Exception as e:
                         st.error(f"Lỗi xử lý: {str(e)}")
@@ -740,7 +748,6 @@ with tab2:
 
         st.markdown("---")
         st.markdown(f"### ✏️ Bảng Chi Tiết Chiết Tính (Hồ Sơ #{sel_id})")
-        st.caption("💡 **Cơ chế dò mã Master:** Bạn có thể nhập/sửa trực tiếp mã ở cột **Code (Mã Master)** rồi bấm **'🔍 Tự Động Tra Lại Tên & Giá Theo Mã Code'** hoặc bấm **Lưu** để hệ thống tự động điền đúng Tên vật tư, ĐVT và Đơn giá.")
 
         state_key = f"df_edit_data_{sel_id}"
         if state_key not in st.session_state:
@@ -765,6 +772,11 @@ with tab2:
             df_init['Vị trí'] = df_init['Vị trí'].fillna("Theo bản vẽ")
             df_init['Ý nghĩa'] = df_init['Ý nghĩa'].fillna("KL Net + Hao hụt = KL Gross xưởng")
             st.session_state[state_key] = df_init
+
+        # CẢNH BÁO DÒNG 0 Đ TRONG BẢNG CHI TIẾT
+        zero_rows = st.session_state[state_key][st.session_state[state_key]['Đơn giá'] == 0.0]
+        if not zero_rows.empty:
+            st.warning(f"⚠️ Hồ sơ này có **{len(zero_rows)}** hạng mục đang có Đơn giá bằng **0 đ**. Hãy nhập mã Code Master và nhấn nút màu xanh bên dưới để tra cứu bổ sung giá!")
 
         # Bảng dữ liệu có thể chỉnh sửa
         edited_df = st.data_editor(
@@ -801,7 +813,6 @@ with tab2:
             }
         )
 
-        # Nút tiện ích tra cứu lại theo mã Code vừa gõ trên bảng edited_df
         c_tool1, c_tool2, c_tool3 = st.columns([1.8, 1.8, 2.4])
         with c_tool1:
             if st.button("🔍 Tự Động Tra Lại Tên & Giá Theo Mã Code", use_container_width=True):
@@ -819,7 +830,7 @@ with tab2:
                         updated_df.at[idx, 'KL Tổng (Gross)'] = gross_q
                         updated_df.at[idx, 'Thành tiền'] = round(gross_q * master_item['unit_cost'], 0)
                 st.session_state[state_key] = updated_df
-                st.success("✅ Đã cập nhật đúng Tên vật tư, ĐVT và Đơn giá từ mã Code Master!")
+                st.success("✅ Đã cập nhật Tên vật tư, ĐVT và Đơn giá từ kho Master!")
                 st.rerun()
 
         with c_tool2:
@@ -840,7 +851,6 @@ with tab2:
                     w_pct = float(row['% Hao hụt']) if pd.notna(row['% Hao hụt']) else 0.0
                     u_cost = float(row['Đơn giá']) if pd.notna(row['Đơn giá']) else 0.0
                     
-                    # Nếu mã Code hợp lệ trong Master và người dùng vừa đổi mã, tự động lấy thông tin chuẩn từ Master
                     if m_code in PRICE_MASTER:
                         master_data = PRICE_MASTER[m_code]
                         desc = master_data['name']

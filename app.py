@@ -503,7 +503,7 @@ with tab1:
                         Trong trường `description`, phải ghi TÊN CHỦNG LOẠI VẬT TƯ chuẩn xác (kèm độ dày mm), còn vị trí lắp đặt ghi riêng vào trường `location`.
                         """
 
-                        MODELS_TO_TRY = ['gemini-3.8-flash',gemini-3.8-flash-lite,'gemini-2.5-flash', 'gemini-1.5-flash']
+                        MODELS_TO_TRY = ['gemini-3.8-flash','gemini-3.5-flash-lite','gemini-2.5-flash', 'gemini-1.5-flash']
                         response = None
                         last_err = None
 

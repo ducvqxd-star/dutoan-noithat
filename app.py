@@ -202,7 +202,7 @@ init_db()
 restore_projects_from_json()
 
 # -------------------------------------------------------------
-# 3. THUẬT TOÁN ĐỊNH MỨC NHÂN CÔNG TỰ ĐỘNG
+# 3. THUẬT TOÁN ĐỊNH MỨC NHÂN CÔNG TỔNG QUÁT THEO HẠNG MỤC
 # -------------------------------------------------------------
 def calculate_dynamic_labor(length_m: float, depth_m: float, height_m: float, item_name: str, specs_text: str):
     name_low = str(item_name).lower()
@@ -362,7 +362,7 @@ def load_price_master():
 PRICE_MASTER, SOURCE_INFO = load_price_master()
 
 # -------------------------------------------------------------
-# 5. TRUY VẤN HỒ SƠ ĐỐI SOÁT CÙNG CHỦNG LOẠI SẢN PHẨM
+# 5. TRUY VẤN HỒ SƠ ĐỐI SOÁT CÙNG LOẠI
 # -------------------------------------------------------------
 def get_approved_benchmark(item_code: str, item_name: str):
     conn = sqlite3.connect(DB_FILE)
@@ -397,7 +397,7 @@ def get_approved_benchmark(item_code: str, item_name: str):
     return bench_id, bench_text
 
 # -------------------------------------------------------------
-# 6. THUẬT TOÁN ĐỊNH DANH VẬT TƯ & QUY CHUẨN ĐƠN VỊ TÍNH (M2 / MD)
+# 6. THUẬT TOÁN ĐỊNH DANH VẬT TƯ & XỬ LÝ QUY ĐỔI KHỐI TÍCH CHUẨN
 # -------------------------------------------------------------
 VALID_SECTIONS = [
     "I. VẬT TƯ THẦU PHỤ",
@@ -468,6 +468,43 @@ def resolve_material_master(section_code: str, raw_code: str, description: str, 
         return section_code, best_code, best_data
 
     return section_code, "CHƯA_CÓ_MÃ", None
+
+def calculate_clean_net_quantity(d_m: float, r_m: float, c_m: float, sl: float, unit_str: str, desc: str):
+    """
+    Quy đổi chuẩn xác khối lượng tịnh (Net Qty):
+    - m3: Bắt buộc nhân Dài x Rộng x Cao x SL (hoặc quy đổi tiết diện chuẩn cho thanh nẹp).
+    - m2: Dài x Rộng x SL.
+    - md: Dài x SL.
+    """
+    unit_lower = str(unit_str).lower().strip()
+    desc_low = str(desc).lower()
+
+    if "m3" in unit_lower:
+        # Nếu là phào nẹp viền, len chỉ chu vi nhưng bị gắn mã gỗ xẻ m3
+        if r_m > 0 and c_m > 0:
+            return round(d_m * r_m * c_m * sl, 4)
+        elif r_m > 0 and c_m == 0:
+            # Mặt ván dày chuẩn 20mm (0.02m)
+            return round(d_m * r_m * 0.020 * sl, 4)
+        elif any(k in desc_low for k in ["chu vi", "phào", "nẹp", "len chân", "chỉ"]):
+            # Thanh phào nẹp thô tiết diện 50x50mm
+            return round(d_m * 0.05 * 0.05 * sl, 4)
+        else:
+            return round(d_m * 0.025 * 0.100 * sl, 4)
+            
+    elif "m2" in unit_lower:
+        if r_m > 0:
+            return round(d_m * r_m * sl, 3)
+        elif c_m > 0:
+            return round(d_m * c_m * sl, 3)
+        else:
+            return round(d_m * sl, 3)
+
+    elif "md" in unit_lower or unit_lower == "m":
+        return round(d_m * sl, 3)
+
+    else:
+        return round(sl, 2)
 
 def clean_section_row(row):
     val = row.get('Mục chiết tính (I -> VII)')
@@ -599,7 +636,7 @@ with tab1:
         st.subheader("1. Dữ liệu bản vẽ & Thông số kỹ thuật")
         project_name = st.text_input("Tên dự án / Công trình:", value="Biệt thự Park City")
         item_code = st.text_input("Mã sản phẩm / Hạng mục:", value="TG-01")
-        item_name = st.text_input("Tên sản phẩm:", value="Trần gỗ tiêu âm phòng khách")
+        item_name = st.text_input("Tên sản phẩm:", value="Trần gỗ phòng rượu")
         dimensions = st.text_input("Kích thước bao (DxRxC mm):", value="4095 x 2625 x 100 mm")
         
         uploaded_files = st.file_uploader("Upload ảnh 3D hoặc bản vẽ kỹ thuật:", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
@@ -612,10 +649,10 @@ with tab1:
         specs = st.text_area(
             "Quy cách kỹ thuật & Vật liệu chỉ định:",
             height=140, 
-            value="- Khung xương sắt hộp mạ kẽm 20x40x1.2mm bắt ty treo chống rung (đan ô 500x500mm, tính theo mét dài md).\n- Tấm ốp trần MDF chống ẩm phủ Melamine/Veneer sồi xẻ rãnh tiêu âm (tính theo m2 mặt bằng trần).\n- Phào cổ trần và nẹp chỉ viền gỗ sồi tự nhiên sơn PU hoàn thiện (tính theo mét dài md chạy quanh chu vi).\n- Đèn rãnh LED hắt trần viền xung quanh."
+            value="- Khung xương thép hộp 20x40x1.2mm bắt ty treo chống rung (đan ô 500x500mm, tính theo mét dài md).\n- Tấm ốp trần MDF chống ẩm phủ Melamine/Veneer sồi (tính theo m2 mặt bằng trần).\n- Phào cổ trần và nẹp chỉ viền gỗ tự nhiên chạy quanh chu vi (tính theo mét dài md).\n- Đèn rãnh LED hắt trần viền xung quanh."
         )
 
-        submit_btn = st.button("🚀 Bắt đầu bóc tách dự toán (Chuẩn m2 & md)", type="primary", use_container_width=True)
+        submit_btn = st.button("🚀 Bắt đầu bóc tách dự toán (Quy đổi chuẩn m2 / md)", type="primary", use_container_width=True)
 
     with c2:
         st.subheader("2. Chi phí tổng quan")
@@ -625,7 +662,7 @@ with tab1:
             elif not uploaded_files:
                 st.warning("Vui lòng tải lên ít nhất 1 ảnh bản vẽ kỹ thuật.")
             else:
-                with st.spinner(f"AI QS đang phân tích bản vẽ {item_name} theo đơn vị m2 & md..."):
+                with st.spinner(f"AI QS đang phân tích và quy đổi khối lượng chính xác cho {item_name}..."):
                     try:
                         client = genai.Client(api_key=api_key)
                         images = []
@@ -659,19 +696,19 @@ with tab1:
                         - Quy cách kỹ thuật:
                         {specs}
 
-                        QUY TẮC BÓC TÁCH CHUẨN XÁC ĐƠN VỊ TÍNH (M2 / MD):
+                        QUY TẮC BẮT BUỘC ĐỐI VỚI ĐƠN VỊ TÍNH & KHỐI LƯỢNG:
                         1. Khung xương thép hộp 20x40x1.2mm (KS.V30):
                            - BẮT BUỘC ĐVT = 'md' (mét dài).
-                           - Tổng mét dài quy đổi = Diện tích x 5.0 md/m2 = đúng {steel_linear_meters} md. (Nhập Dài = {steel_linear_meters}, Rộng = 0, SL = 1, ĐVT = 'md').
+                           - Mét dài quy đổi = đúng {steel_linear_meters} md. (Dài = {steel_linear_meters}, Rộng = 0, SL = 1, ĐVT = 'md').
                         2. Tấm ốp trần / ván tiêu âm / ván nền:
                            - BẮT BUỘC ĐVT = 'm2'.
-                           - Dài = {l_m:.3f}m, Rộng = {d_m:.3f}m, SL = 1.0 (Diện tích = {area_ceiling} m2), hao hụt = 8-10%.
-                        3. Phào cổ trần / nẹp chỉ viền / đèn LED viền:
-                           - BẮT BUỘC ĐVT = 'md' chạy theo chu vi ({perimeter_ceiling} md).
+                           - Dài = {l_m:.3f}m, Rộng = {d_m:.3f}m, SL = 1.0 (Diện tích = {area_ceiling} m2), hao hụt = 10%.
+                        3. Phào cổ trần / nẹp chỉ viền xung quanh:
+                           - BẮT BUỘC ĐVT = 'md' chạy theo chu vi (Dài = {perimeter_ceiling} md, Rộng = 0.05, Cao = 0.05, SL = 1).
                         4. Nhân công:
-                           - NC-SX (Sản xuất): đúng {prod_days_calc} công, ĐVT='Công'.
-                           - NC-LD (Lắp đặt): đúng {inst_days_calc} công, ĐVT='Công'.
-                        5. TUYỆT ĐỐI KHÔNG BÓC ĐÁ HAY DA NẾU BẢN VẼ LÀ TRẦN GỖ.
+                           - NC-SX: đúng {prod_days_calc} công, ĐVT='Công'.
+                           - NC-LD: đúng {inst_days_calc} công, ĐVT='Công'.
+                        5. TUYỆT ĐỐI KHÔNG BÓC ĐÁ HOẶC DA NẾU BẢN VẼ LÀ TRẦN GỖ.
                         """
 
                         if benchmark_context:
@@ -693,7 +730,7 @@ with tab1:
                                         model=current_model,
                                         contents=[*images, prompt],
                                         config=types.GenerateContentConfig(
-                                            system_instruction="BẠN LÀ SENIOR QS NỘI THẤT. Bóc tách trung thực, khung thép bắt buộc tính theo mét dài (md), ván tính theo m2.",
+                                            system_instruction="BẠN LÀ SENIOR QS NỘI THẤT. Khung thép bắt buộc tính theo md, ván trần tính theo m2, nẹp viền tính theo md.",
                                             response_mime_type="application/json",
                                             response_schema=TakeoffResult,
                                             temperature=0.0
@@ -734,26 +771,18 @@ with tab1:
 
                             final_sec, matched_code, item_info = resolve_material_master(s_code, raw_code, ai_desc, loc, unit_str)
 
-                            # Tự động đồng bộ chuẩn ĐVT nếu là khung thép hộp
+                            # Khung thép hộp tự động chuẩn hóa về mét dài md
                             if matched_code == "KS.V30" or "thép hộp" in ai_desc.lower() or "sắt hộp" in ai_desc.lower():
                                 unit_str = "md"
                                 if r_m > 0 and d_m < 20.0:
-                                    # Quy đổi từ ô kích thước trần sang mét dài đan xương thực tế
                                     net_q = round(d_m * r_m * 5.0, 1)
                                     d_m = net_q
                                     r_m = 0.0
                                 else:
                                     net_q = round(d_m * sl, 1)
                             else:
-                                unit_lower = unit_str.lower()
-                                if "m3" in unit_lower:
-                                    net_q = round(d_m * r_m * c_m * sl, 3)
-                                elif "m2" in unit_lower:
-                                    net_q = round(d_m * r_m * sl, 3) if r_m > 0 else round(d_m * c_m * sl, 3)
-                                elif "md" in unit_lower or "m" == unit_lower:
-                                    net_q = round(d_m * sl, 3)
-                                else:
-                                    net_q = round(sl, 2)
+                                # Tính khối lượng tịnh an toàn, triệt tiêu lỗi m3 bị nhân nhầm
+                                net_q = calculate_clean_net_quantity(d_m, r_m, c_m, sl, unit_str, ai_desc)
 
                             if item_info:
                                 u_cost = item_info["unit_cost"]
@@ -770,14 +799,14 @@ with tab1:
                                 waste_q = math.ceil(net_q * (w_pct / 100.0)) if w_pct > 0 else 0
                                 gross_q = net_q + waste_q
                             else:
-                                waste_q = round(net_q * (w_pct / 100.0), 3)
-                                gross_q = round(net_q + waste_q, 3)
+                                waste_q = round(net_q * (w_pct / 100.0), 4 if "m3" in final_unit.lower() else 3)
+                                gross_q = round(net_q + waste_q, 4 if "m3" in final_unit.lower() else 3)
 
-                            amt = gross_q * u_cost
+                            amt = round(gross_q * u_cost, 0)
                             total_direct += amt
                             
                             meaning_text = f"{loc}: {d_m:.2f}x{r_m:.2f}x{sl:.0f}"
-                            formula_text = f"{gross_q:.2f} x {u_cost:,.0f} đ"
+                            formula_text = f"{gross_q:.3f} x {u_cost:,.0f} đ"
 
                             boq_records.append({
                                 "section_code": final_sec,
@@ -840,7 +869,7 @@ with tab1:
                         m2.metric(f"Chi phí chung ({overhead_rate}%)", f"{overhead_amt:,.0f} đ")
                         m3.metric(f"Giá chào thầu ({profit_rate}%)", f"{tender_amt:,.0f} đ")
 
-                        st.info(f"📐 **Quy cách trần gỗ:** Mặt bằng trần: **{area_ceiling} m2** | Khung thép hộp đan xương: **{steel_linear_meters} md** | Chu vi nẹp phào: **{perimeter_ceiling} md**.")
+                        st.info(f"📐 **Quy cách hình học chuẩn:** Mặt bằng trần: **{area_ceiling} m2** | Khung đan xương: **{steel_linear_meters} md** | Chu vi nẹp phào: **{perimeter_ceiling} md**.")
 
                     except Exception as e:
                         st.error(f"Lỗi xử lý: {str(e)}")
@@ -876,7 +905,7 @@ with tab2:
     df_saved = pd.read_sql_query(query, conn, params=params)
     
     if df_saved.empty:
-        st.info("Chưa có hồ sơ dự toán nào được lưu.")
+        st.info("Chưa có hồ sơ dự toán nào được lưu. Bạn có thể sang Tab 1 để bóc tách mới!")
     else:
         df_display = df_saved.rename(columns={
             "id": "ID",
@@ -997,9 +1026,9 @@ with tab2:
                 "Cao (m)": st.column_config.NumberColumn("Cao (m)", min_value=0.0, format="%.3f"),
                 "SL": st.column_config.NumberColumn("SL", min_value=0.0, format="%.1f"),
                 "ĐVT": st.column_config.TextColumn("ĐVT", required=True),
-                "KL Tịnh (Net)": st.column_config.NumberColumn("KL Tịnh (Net)", min_value=0.0, format="%.3f"),
+                "KL Tịnh (Net)": st.column_config.NumberColumn("KL Tịnh (Net)", min_value=0.0, format="%.4f"),
                 "% Hao hụt": st.column_config.NumberColumn("% Hao hụt", min_value=0.0, max_value=100.0, format="%.1f%%"),
-                "KL Tổng (Gross)": st.column_config.NumberColumn("KL Tổng (Gross)", disabled=True, format="%.3f"),
+                "KL Tổng (Gross)": st.column_config.NumberColumn("KL Tổng (Gross)", disabled=True, format="%.4f"),
                 "Đơn giá": st.column_config.NumberColumn("Đơn giá", min_value=0.0, format="%d đ"),
                 "Thành tiền": st.column_config.NumberColumn("Thành tiền", disabled=True, format="%d đ")
             }
@@ -1007,7 +1036,7 @@ with tab2:
 
         c_tool1, c_tool2, c_tool3 = st.columns([2.4, 1.8, 1.8])
         with c_tool1:
-            if st.button("🔍 Tra Cứu & Đồng Bộ Giá Tự Động Theo Tên", use_container_width=True):
+            if st.button("🔍 Đồng Bộ & Chuẩn Hóa Lại Khối Lượng m2/md/m3", use_container_width=True):
                 updated_df = edited_df.copy()
                 match_count = 0
                 for idx in updated_df.index:
@@ -1017,25 +1046,39 @@ with tab2:
                     sec_val = str(updated_df.at[idx, 'Mục chiết tính (I -> VII)']).strip()
                     cost_val = float(updated_df.at[idx, 'Đơn giá'] or 0.0)
 
-                    target_sec, found_code, master_item = resolve_material_master(sec_val, code_val, desc_val, loc_val, str(updated_df.at[idx, 'ĐVT']))
+                    d_m = float(updated_df.at[idx, 'Dài (m)'] or 0.0)
+                    r_m = float(updated_df.at[idx, 'Rộng (m)'] or 0.0)
+                    c_m = float(updated_df.at[idx, 'Cao (m)'] or 0.0)
+                    sl = float(updated_df.at[idx, 'SL'] or 1.0)
+                    w_pct = float(updated_df.at[idx, '% Hao hụt'] or 0.0)
+                    unit_v = str(updated_df.at[idx, 'ĐVT'])
+
+                    target_sec, found_code, master_item = resolve_material_master(sec_val, code_val, desc_val, loc_val, unit_v)
                     
-                    if master_item and (cost_val == 0.0 or code_val != found_code or sec_val != target_sec):
-                        updated_df.at[idx, 'Mục chiết tính (I -> VII)'] = target_sec
-                        updated_df.at[idx, 'Code'] = found_code
-                        updated_df.at[idx, 'Vật tư / Hạng mục'] = master_item['name']
-                        updated_df.at[idx, 'ĐVT'] = master_item['unit']
-                        updated_df.at[idx, 'Đơn giá'] = master_item['unit_cost']
-                        
-                        net_q = float(updated_df.at[idx, 'KL Tịnh (Net)'] or 1.0)
-                        w_pct = float(updated_df.at[idx, '% Hao hụt'] or 0.0)
-                        gross_q = round(net_q * (1 + w_pct / 100.0), 3)
-                        updated_df.at[idx, 'KL Tổng (Gross)'] = gross_q
-                        updated_df.at[idx, 'Thành tiền'] = round(gross_q * master_item['unit_cost'], 0)
-                        match_count += 1
+                    if master_item:
+                        code_val = found_code
+                        desc_val = master_item['name']
+                        unit_v = master_item['unit']
+                        cost_val = master_item['unit_cost']
+
+                    # Tính lại Net chuẩn xác không nhân nhầm m3
+                    net_q = calculate_clean_net_quantity(d_m, r_m, c_m, sl, unit_v, desc_val)
+                    waste_q = round(net_q * (w_pct / 100.0), 4 if "m3" in unit_v.lower() else 3)
+                    gross_q = round(net_q + waste_q, 4 if "m3" in unit_v.lower() else 3)
+
+                    updated_df.at[idx, 'Mục chiết tính (I -> VII)'] = target_sec
+                    updated_df.at[idx, 'Code'] = code_val
+                    updated_df.at[idx, 'Vật tư / Hạng mục'] = desc_val
+                    updated_df.at[idx, 'ĐVT'] = unit_v
+                    updated_df.at[idx, 'Đơn giá'] = cost_val
+                    updated_df.at[idx, 'KL Tịnh (Net)'] = net_q
+                    updated_df.at[idx, 'KL Tổng (Gross)'] = gross_q
+                    updated_df.at[idx, 'Thành tiền'] = round(gross_q * cost_val, 0)
+                    match_count += 1
                 
                 updated_df['Mục chiết tính (I -> VII)'] = updated_df.apply(clean_section_row, axis=1)
                 st.session_state[state_key] = updated_df
-                st.success(f"✅ Đã đồng bộ giá chuẩn xác cho {match_count} cấu kiện!")
+                st.success(f"✅ Đã chuẩn hóa đúng quy chuẩn khối lượng cho {match_count} cấu kiện!")
                 st.rerun()
 
         with c_tool2:
@@ -1059,15 +1102,7 @@ with tab2:
                     
                     net_q = float(row['KL Tịnh (Net)']) if pd.notna(row['KL Tịnh (Net)']) else 0.0
                     if net_q == 0.0:
-                        u_low = unit.lower()
-                        if "m3" in u_low:
-                            net_q = round(d_m * r_m * c_m * sl, 3)
-                        elif "m2" in u_low:
-                            net_q = round(d_m * r_m * sl, 3) if r_m > 0 else round(d_m * c_m * sl, 3)
-                        elif "md" in u_low:
-                            net_q = round(d_m * sl, 3)
-                        else:
-                            net_q = sl
+                        net_q = calculate_clean_net_quantity(d_m, r_m, c_m, sl, unit, desc)
 
                     w_pct = float(row['% Hao hụt']) if pd.notna(row['% Hao hụt']) else 0.0
                     u_cost = float(row['Đơn giá']) if pd.notna(row['Đơn giá']) else 0.0
@@ -1080,13 +1115,13 @@ with tab2:
                             unit = f_item['unit']
                             u_cost = f_item['unit_cost']
 
-                    waste_q = round(net_q * (w_pct / 100.0), 3)
-                    gross_q = round(net_q + waste_q, 3)
+                    waste_q = round(net_q * (w_pct / 100.0), 4 if "m3" in unit.lower() else 3)
+                    gross_q = round(net_q + waste_q, 4 if "m3" in unit.lower() else 3)
                     amt = round(gross_q * u_cost, 0)
                     new_total_direct += amt
                     
                     meaning = f"{loc}: {d_m:.2f}x{r_m:.2f}x{sl:.0f}"
-                    formula = f"{gross_q:.2f} x {u_cost:,.0f} đ"
+                    formula = f"{gross_q:.3f} x {u_cost:,.0f} đ"
                     
                     cur_save.execute('''
                         INSERT INTO boq_items 

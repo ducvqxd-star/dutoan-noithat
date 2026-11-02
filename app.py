@@ -23,16 +23,18 @@ st.set_page_config(
     layout="wide"
 )
 
-# Chống mờ chữ và tăng độ nét bảng số liệu trên cả giao diện Sáng & Tối
+# Chống mờ chữ và ép bảng hiển thị sắc nét toàn diện
 st.markdown("""
 <style>
     div[data-testid="stDataFrame"] {
         opacity: 1 !important;
         filter: none !important;
+        width: 100% !important;
     }
     .stDataFrame td, .stDataFrame th {
         font-weight: 500 !important;
         font-size: 13px !important;
+        white-space: nowrap !important;
     }
     .stApp {
         opacity: 1 !important;
@@ -44,21 +46,18 @@ DB_FILE = "qs_multiuser.db"
 IMAGE_DIR = "uploaded_drawings"
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
-# Lấy API Key từ Secrets của Streamlit Cloud an toàn
 try:
     CLOUD_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 except Exception:
     CLOUD_API_KEY = ""
 
 def get_vietnam_time():
-    """Lấy thời gian chuẩn theo múi giờ Việt Nam (GMT+7)"""
     tz_vn = timezone(timedelta(hours=7))
     return datetime.now(tz_vn).strftime("%Y-%m-%d %H:%M:%S")
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Bảng người dùng
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,7 +67,6 @@ def init_db():
             role TEXT
         )
     ''')
-    # Bảng lưu hồ sơ dự toán
     c.execute('''
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,16 +87,15 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     ''')
-    try:
-        c.execute("ALTER TABLE projects ADD COLUMN review_status TEXT DEFAULT 'Chờ duyệt'")
-    except Exception:
-        pass
-    try:
-        c.execute("ALTER TABLE projects ADD COLUMN review_note TEXT DEFAULT ''")
-    except Exception:
-        pass
+    for col_def in [
+        "review_status TEXT DEFAULT 'Chờ duyệt'",
+        "review_note TEXT DEFAULT ''"
+    ]:
+        try:
+            c.execute(f"ALTER TABLE projects ADD COLUMN {col_def}")
+        except Exception:
+            pass
 
-    # Bảng lưu chi tiết từng dòng BOQ
     c.execute('''
         CREATE TABLE IF NOT EXISTS boq_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -119,26 +116,17 @@ def init_db():
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         )
     ''')
-    try:
-        c.execute("ALTER TABLE boq_items ADD COLUMN section_code TEXT DEFAULT ''")
-    except Exception:
-        pass
-    try:
-        c.execute("ALTER TABLE boq_items ADD COLUMN location TEXT DEFAULT ''")
-    except Exception:
-        pass
-    try:
-        c.execute("ALTER TABLE boq_items ADD COLUMN waste_qty REAL DEFAULT 0.0")
-    except Exception:
-        pass
-    try:
-        c.execute("ALTER TABLE boq_items ADD COLUMN meaning TEXT DEFAULT ''")
-    except Exception:
-        pass
-    try:
-        c.execute("ALTER TABLE boq_items ADD COLUMN formula TEXT DEFAULT ''")
-    except Exception:
-        pass
+    for col_def in [
+        "section_code TEXT DEFAULT ''",
+        "location TEXT DEFAULT ''",
+        "waste_qty REAL DEFAULT 0.0",
+        "meaning TEXT DEFAULT ''",
+        "formula TEXT DEFAULT ''"
+    ]:
+        try:
+            c.execute(f"ALTER TABLE boq_items ADD COLUMN {col_def}")
+        except Exception:
+            pass
 
     admin_pw = hashlib.sha256("admin123".encode()).hexdigest()
     qs1_pw = hashlib.sha256("qs123".encode()).hexdigest()
@@ -188,7 +176,6 @@ def load_price_master():
 
         df_raw = pd.read_excel(target_file, sheet_name=target_sheet, header=None)
         
-        # Mặc định theo cấu trúc sheet DMVT: Cột B (Mã: 1), C (Tên: 2), D (ĐVT: 3), O (Đơn giá tính: 14)
         col_code = 1
         col_name = 2
         col_unit = 3
@@ -248,7 +235,7 @@ def load_price_master():
 PRICE_MASTER, SOURCE_INFO = load_price_master()
 
 # -------------------------------------------------------------
-# 3. QUẢN LÝ ĐĂNG NHẬP (MULTI-USER)
+# 3. QUẢN LÝ ĐĂNG NHẬP
 # -------------------------------------------------------------
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
@@ -297,7 +284,7 @@ class ChiTietVatTu(BaseModel):
     waste_factor_percent: float
 
 class NhomChiTiet(BaseModel):
-    section_code: str  # 'I. VẬT TƯ THẦU PHỤ', 'II. VẬT TƯ CHÍNH', v.v.
+    section_code: str  # I. VẬT TƯ THẦU PHỤ, II. VẬT TƯ CHÍNH, ...
     items: List[ChiTietVatTu]
 
 class TakeoffResult(BaseModel):
@@ -307,7 +294,7 @@ class TakeoffResult(BaseModel):
     technical_risks_and_notes: List[str]
 
 # -------------------------------------------------------------
-# 5. GIAO DIỆN CHÍNH CỦA ỨNG DỤNG
+# 5. GIAO DIỆN CHÍNH
 # -------------------------------------------------------------
 user = st.session_state['user_info']
 
@@ -357,7 +344,7 @@ with tab1:
         submit_btn = st.button("🚀 Bắt đầu bóc tách & Tính chiết tính", type="primary", use_container_width=True)
 
     with c2:
-        st.subheader("2. Bảng BOQ & Chiết tính chi phí xưởng")
+        st.subheader("2. Chi phí tổng quan")
         if submit_btn:
             if not api_key:
                 st.error("Vui lòng cấu hình Gemini API Key.")
@@ -377,7 +364,6 @@ with tab1:
                             img.save(spath)
                             saved_paths.append(spath)
 
-                        # PROMPT ÉP KHUÔN CẤU TRÚC 7 MỤC CHUẨN TỪ BẢN VẼ CHIẾT TÍNH (I -> VII)
                         prompt = f"""
                         BẠN LÀ SENIOR QS NỘI THẤT. BÓC TÁCH KHỐI LƯỢNG KỸ THUẬT VÀ CHIẾT TÍNH ĐÚNG CẤU TRÚC TỪ I ĐẾN VII:
                         - Mã hiệu sản phẩm: {item_code}
@@ -386,41 +372,18 @@ with tab1:
                         - Quy cách vật liệu:
                         {specs}
 
-                        YÊU CẦU PHÂN CHIA BẮT BUỘC ĐÚNG 7 NHÓM CẤU KIỆN SAU (TÊN section_code PHẢI CHÍNH XÁC):
+                        PHÂN BỔ BẮT BUỘC ĐÚNG 7 NHÓM SAU (TÊN section_code BẮT BUỘC CHÍNH XÁC):
+                        I. VẬT TƯ THẦU PHỤ: Hạng mục gia công ngoài / nhà thầu phụ (nếu có).
+                        II. VẬT TƯ CHÍNH: Gỗ tự nhiên xẻ sấy, ván dán Plywood, ván cốt MDF/HDF chống ẩm, tấm Cemboard lót.
+                        III. HOÀN THIỆN (KIM LOẠI, PU...): Nẹp chỉ kim loại, thanh Inox La mạ PVD, khung nhôm viền.
+                        IV. NHÂN CÔNG & VẬT LIỆU HOÀN THIỆN PHỤ: Nhân công thợ mộc, sơn PU, ép dán Veneer/Laminate, keo/vít.
+                        V. BAO BÌ: Màng PE, bọc carton bảo vệ sản phẩm chống trầy.
+                        VI. PHỤ KIỆN: Bản lề giảm chấn, ray trượt âm, tay nắm nhôm, khóa.
+                        VII. SOURCE NGOÀI: Mặt bàn đá nung kết/đá tự nhiên líp mòi 45 độ, kính cánh tủ, màng xuyên sáng.
 
-                        I. VẬT TƯ THẦU PHỤ:
-                           - Các hạng mục vật tư gia công chuyển tiếp hoặc do thầu phụ cung ứng (nếu có).
-
-                        II. VẬT TƯ CHÍNH:
-                           - Gỗ tự nhiên xẻ sấy (Sồi, Tần bì, Gỗ tạp cứng...) tính theo m3 hoặc m dài.
-                           - Ván dán Plywood / Cốt MDF chống ẩm tính theo m2 vách, hông, đợt, cánh.
-                           - Tấm lót Cemboard / Foam đệm lót.
-                           - Hao hụt: Gỗ tự nhiên (20-25%), Gỗ công nghiệp (8-10%).
-
-                        III. HOÀN THIỆN (KIM LOẠI, PU...):
-                           - Nẹp chỉ kim loại, thanh Inox La mạ PVD, khung viền kim loại (m2 hoặc md).
-                           - Hao hụt nẹp/kim loại: đúng 5%.
-
-                        IV. NHÂN CÔNG & VẬT LIỆU HOÀN THIỆN PHỤ:
-                           - Nhân công thợ mộc (Tính theo công hoặc tỷ lệ 8% - 12%).
-                           - Sơn PU bóng/mờ hoàn thiện (tính theo m2 bề mặt).
-                           - Dán phủ bề mặt Melamine / Veneer / Laminate (m2).
-                           - Phụ liệu: Đinh, vít, keo, màng PE (tính % hoặc gói).
-
-                        V. BAO BÌ:
-                           - Bao bì bảo vệ sản phẩm, màng bọc chống trầy, thùng carton/khung gỗ (m2 hoặc bộ). Hao hụt: 0%.
-
-                        VI. PHỤ KIỆN:
-                           - Tay nắm, bản lề giảm chấn, ray trượt âm, khóa tủ (ĐVT: cái hoặc bộ). Hao hụt: 0% hoặc 5%.
-
-                        VII. SOURCE NGOÀI:
-                           - Mặt bàn đá tự nhiên / đá nung kết líp mòi 45 độ (m2). Hao hụt: 10%.
-                           - Kính cánh tủ, gương, hệ màng xuyên sáng (m2).
-
-                        Quy định: Với mỗi chi tiết, nêu rõ vị trí lắp đặt (location) như: 'Hông tủ', 'Đáy tủ', 'Vách ngăn', 'Cánh tủ', 'Mặt đá'.
+                        Ghi rõ vị trí cụ thể (location) cho từng chi tiết.
                         """
 
-                        # Áp dụng danh sách model chỉ định: gemini-3.8-flash, gemini-3.1-pro
                         MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-3.1-pro']
                         response = None
                         last_err = None
@@ -432,7 +395,7 @@ with tab1:
                                         model=current_model,
                                         contents=[*images, prompt],
                                         config=types.GenerateContentConfig(
-                                            system_instruction="BẠN LÀ CHUYÊN GIA SENIOR QS NỘI THẤT. Bóc tách chiết tính đúng biểu mẫu 7 phần I -> VII, tính toán tất định theo hình học bản vẽ.",
+                                            system_instruction="BẠN LÀ CHUYÊN GIA SENIOR QS NỘI THẤT. Bóc tách chiết tính 7 phần I -> VII chuẩn xác.",
                                             response_mime_type="application/json",
                                             response_schema=TakeoffResult,
                                             temperature=0.0
@@ -454,7 +417,6 @@ with tab1:
 
                         data = json.loads(response.text)
                         
-                        # Khớp đơn giá Master & Tính toán khối lượng chi tiết
                         total_direct = 0
                         boq_records = []
                         for section in data.get("breakdown_sections", []):
@@ -465,10 +427,7 @@ with tab1:
                                 loc = comp.get("location", "").strip()
                                 unit_str = str(comp.get("unit", "cái")).strip().lower()
                                 
-                                # 1. Khớp mã Master
                                 item_info = PRICE_MASTER.get(code)
-                                
-                                # 2. Dò tìm tương đối theo từ khóa tên vật tư
                                 if not item_info and desc:
                                     best_match = None
                                     best_score = 0
@@ -483,19 +442,13 @@ with tab1:
                                     if best_score >= 1:
                                         item_info = best_match
 
-                                # 3. Đơn giá nếu chưa có trong Master
                                 if not item_info:
-                                    item_info = {
-                                        "name": comp.get("description"),
-                                        "unit": comp.get("unit"),
-                                        "unit_cost": 0.0
-                                    }
+                                    item_info = {"name": comp.get("description"), "unit": comp.get("unit"), "unit_cost": 0.0}
 
                                 u_cost = item_info["unit_cost"]
                                 net_q = float(comp.get("net_quantity", 0.0))
                                 w_pct = float(comp.get("waste_factor_percent", 0.0))
 
-                                # Xử lý hao hụt số nguyên cho ĐVT đếm được
                                 is_discrete = any(u in unit_str for u in ['cai', 'cái', 'bộ', 'bo', 'con', 'chiếc', 'chiec'])
                                 if is_discrete:
                                     waste_q = math.ceil(net_q * (w_pct / 100.0)) if w_pct > 0 else 0
@@ -530,7 +483,6 @@ with tab1:
                         tender_amt = (total_direct + overhead_amt) * (1 + profit_rate / 100.0)
                         created_time_vn = get_vietnam_time()
 
-                        # Lưu vào CSDL
                         conn = sqlite3.connect(DB_FILE)
                         cur = conn.cursor()
                         cur.execute('''
@@ -561,59 +513,21 @@ with tab1:
                         st.success(f"✅ Bóc tách chiết tính 7 phần thành công lúc {created_time_vn} (Giờ VN)!")
                         
                         m1, m2, m3 = st.columns(3)
-                        m1.metric("Tổng giá Cost xưởng (Direct)", f"{total_direct:,.0f} đ")
+                        m1.metric("Tổng giá Cost xưởng", f"{total_direct:,.0f} đ")
                         m2.metric(f"Chi phí chung ({overhead_rate}%)", f"{overhead_amt:,.0f} đ")
                         m3.metric(f"Giá chào thầu ({profit_rate}%)", f"{tender_amt:,.0f} đ")
-
-                        df_view = pd.DataFrame(boq_records)
-                        df_view_show = df_view.rename(columns={
-                            "section_code": "Mục chiết tính (I -> VII)",
-                            "material_code": "Code",
-                            "description": "Vật tư / Hạng mục",
-                            "location": "Vị trí",
-                            "unit": "ĐVT",
-                            "net_qty": "KL Tịnh (Net)",
-                            "waste_percent": "% Hao hụt",
-                            "waste_qty": "KL Hao hụt",
-                            "gross_qty": "KL Tổng (Gross)",
-                            "unit_cost": "Đơn giá",
-                            "amount": "Thành tiền",
-                            "meaning": "Ý nghĩa",
-                            "formula": "Công thức tính"
-                        })
-
-                        st.dataframe(df_view_show[[
-                            "Mục chiết tính (I -> VII)", "Code", "Vật tư / Hạng mục", "Vị trí", "ĐVT", 
-                            "KL Tịnh (Net)", "% Hao hụt", "KL Hao hụt", "KL Tổng (Gross)", 
-                            "Đơn giá", "Thành tiền", "Ý nghĩa", "Công thức tính"
-                        ]].style.format({
-                            "KL Tịnh (Net)": "{:.2f}",
-                            "% Hao hụt": "{:.1f}%",
-                            "KL Hao hụt": "{:.2f}",
-                            "KL Tổng (Gross)": "{:.2f}",
-                            "Đơn giá": "{:,.0f} đ",
-                            "Thành tiền": "{:,.0f} đ"
-                        }), use_container_width=True)
 
                         st.markdown("⚠️ **Lưu ý kỹ thuật & Cảnh báo gia công:**")
                         for rsk in data.get("technical_risks_and_notes", []):
                             st.info(f"• {rsk}")
 
-                        buf = io.BytesIO()
-                        with pd.ExcelWriter(buf, engine='openpyxl') as wr:
-                            df_view_show.to_excel(wr, index=False, sheet_name='ChietTinh_I_VII')
-                        st.download_button(
-                            "📥 Tải file Chiết tính Excel (.xlsx)", 
-                            data=buf.getvalue(), 
-                            file_name=f"ChietTinh_{item_code}.xlsx", 
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True
-                        )
+                        st.session_state['just_created_id'] = proj_id
+                        st.info("💡 Bạn có thể xem bảng chi tiết đầy đủ 100% chiều ngang tại tab 'Thư Viện Hồ Sơ Đã Lưu'.")
 
                     except Exception as e:
                         st.error(f"Lỗi xử lý: {str(e)}")
 
-# TAB 2: THƯ VIỆN HỒ SƠ ĐÃ LƯU & QUẢN TRỊ KIỂM DUYỆT / XÓA
+# TAB 2: THƯ VIỆN HỒ SƠ ĐÃ LƯU & BẢNG CHI TIẾT TOÀN MÀN HÌNH
 with tab2:
     st.subheader(f"📂 Thư Viện Hồ Sơ Dự Toán")
     conn = sqlite3.connect(DB_FILE)
@@ -670,89 +584,114 @@ with tab2:
         
         st.markdown("---")
         
-        col_act1, col_act2 = st.columns([1, 1])
+        # KHU VỰC THAO TÁC GỌN GÀNG TRÊN CÙNG
+        st.markdown("### 🛠️ Chọn Hồ Sơ & Thao Tác")
+        sel_col1, sel_col2, sel_col3 = st.columns([1.5, 2.5, 1])
         
-        with col_act1:
-            st.markdown("### 📥 Chi tiết Chiết tính & Xuất Excel")
-            sel_id = st.selectbox("Chọn ID hồ sơ:", df_saved["id"].tolist())
-            if sel_id:
-                df_item_detail = pd.read_sql_query(
-                    """SELECT 
-                        section_code AS 'Mục chiết tính (I -> VII)', 
-                        material_code AS 'Code', 
-                        description AS 'Vật tư / Hạng mục', 
-                        location AS 'Vị trí',
-                        unit AS 'ĐVT', 
-                        net_qty AS 'KL Tịnh (Net)', 
-                        waste_percent AS '% Hao hụt', 
-                        waste_qty AS 'KL Hao hụt', 
-                        gross_qty AS 'KL Tổng (Gross)', 
-                        unit_cost AS 'Đơn giá', 
-                        amount AS 'Thành tiền',
-                        meaning AS 'Ý nghĩa',
-                        formula AS 'Công thức tính'
-                    FROM boq_items WHERE project_id = ?""",
-                    conn, params=(sel_id,)
-                )
-
-                st.dataframe(df_item_detail.style.format({
-                    "KL Tịnh (Net)": "{:.2f}",
-                    "% Hao hụt": "{:.1f}%",
-                    "KL Hao hụt": "{:.2f}",
-                    "KL Tổng (Gross)": "{:.2f}",
-                    "Đơn giá": "{:,.0f} đ",
-                    "Thành tiền": "{:,.0f} đ"
-                }), use_container_width=True)
-                
-                buf_re = io.BytesIO()
-                with pd.ExcelWriter(buf_re, engine='openpyxl') as wr:
-                    df_item_detail.to_excel(wr, index=False, sheet_name='ChietTinh_I_VII')
-                st.download_button(
-                    f"📥 Tải file Excel của hồ sơ #{sel_id}", 
-                    data=buf_re.getvalue(), 
-                    file_name=f"ChietTinh_ID_{sel_id}.xlsx", 
-                    use_container_width=True
-                )
-
-        with col_act2:
-            st.markdown("### 🛡️ Thao tác Hồ sơ & Kiểm duyệt")
+        with sel_col1:
+            sel_id = st.selectbox("Chọn ID hồ sơ cần xem:", df_saved["id"].tolist())
             selected_row = df_saved[df_saved["id"] == sel_id].iloc[0]
-            st.info(f"Đang chọn: **#{sel_id} - {selected_row['item_name']}** (Người tạo: {selected_row['nguoi_tao']})")
-            
+            st.caption(f"Hạng mục: **{selected_row['item_name']}** | Tạo bởi: **{selected_row['nguoi_tao']}**")
+
+        with sel_col2:
             if user['role'] == 'admin':
-                st.markdown("#### 1. Đánh giá tính chính xác của Đơn giá:")
                 cur_status = selected_row['review_status'] if pd.notna(selected_row['review_status']) else 'Chờ duyệt'
                 status_options = ['Chờ duyệt', '✅ Đúng giá', '❌ Sai giá']
                 status_idx = status_options.index(cur_status) if cur_status in status_options else 0
                 
-                new_status = st.radio("Kết quả kiểm duyệt:", status_options, index=status_idx, horizontal=True)
-                new_note = st.text_input("Ghi chú của Quản trị viên:", value=selected_row['review_note'] if pd.notna(selected_row['review_note']) else '')
+                c_rev1, c_rev2 = st.columns([1.5, 2.5])
+                with c_rev1:
+                    new_status = st.radio("Đánh giá của Admin:", status_options, index=status_idx, horizontal=True)
+                with c_rev2:
+                    new_note = st.text_input("Ghi chú Admin:", value=selected_row['review_note'] if pd.notna(selected_row['review_note']) else '')
                 
-                if st.button("💾 Cập nhật đánh giá", type="primary", use_container_width=True):
+                if st.button("💾 Cập nhật kiểm duyệt", type="primary"):
                     cur_u = conn.cursor()
                     cur_u.execute("UPDATE projects SET review_status = ?, review_note = ? WHERE id = ?", (new_status, new_note, sel_id))
                     conn.commit()
-                    st.success("Đã lưu kết quả kiểm duyệt đơn giá thành công!")
+                    st.success("Đã cập nhật!")
                     time.sleep(0.5)
                     st.rerun()
             else:
-                st.caption(f"Trạng thái kiểm duyệt: **{selected_row['review_status']}**")
-                if selected_row['review_note']:
-                    st.caption(f"Ghi chú: {selected_row['review_note']}")
+                st.info(f"Trạng thái: **{selected_row['review_status']}** | Ghi chú: {selected_row['review_note'] if selected_row['review_note'] else 'Không có'}")
 
-            st.markdown("---")
-            st.markdown("#### 2. Xóa hồ sơ:")
+        with sel_col3:
+            st.write("")
+            st.write("")
             if user['role'] == 'admin' or selected_row['user_id'] == user['id']:
-                if st.button(f"🗑️ Xóa vĩnh viễn hồ sơ #{sel_id}", type="secondary", use_container_width=True):
+                if st.button(f"🗑️ Xóa hồ sơ #{sel_id}", type="secondary", use_container_width=True):
                     cur_d = conn.cursor()
                     cur_d.execute("DELETE FROM boq_items WHERE project_id = ?", (sel_id,))
                     cur_d.execute("DELETE FROM projects WHERE id = ?", (sel_id,))
                     conn.commit()
-                    st.warning(f"Đã xóa hoàn toàn hồ sơ #{sel_id} khỏi hệ thống.")
+                    st.warning(f"Đã xóa hoàn toàn hồ sơ #{sel_id}.")
                     time.sleep(0.5)
                     st.rerun()
-            else:
-                st.caption("🔒 Bạn chỉ có thể xóa các hồ sơ do chính bạn tạo.")
+
+        # BẢNG CHI TIẾT BOQ HIỂN THỊ TOÀN CHIỀU NGANG MÀN HÌNH (100% WIDTH)
+        st.markdown("---")
+        st.markdown(f"### 📋 Bảng Chi Tiết Chiết Tính Đầy Đủ (Hồ Sơ #{sel_id})")
+        
+        df_item_detail = pd.read_sql_query(
+            """SELECT 
+                section_code AS 'Mục chiết tính (I -> VII)', 
+                material_code AS 'Code', 
+                description AS 'Vật tư / Hạng mục', 
+                location AS 'Vị trí',
+                unit AS 'ĐVT', 
+                net_qty AS 'KL Tịnh (Net)', 
+                waste_percent AS '% Hao hụt', 
+                waste_qty AS 'KL Hao hụt', 
+                gross_qty AS 'KL Tổng (Gross)', 
+                unit_cost AS 'Đơn giá', 
+                amount AS 'Thành tiền',
+                meaning AS 'Ý nghĩa',
+                formula AS 'Công thức tính'
+            FROM boq_items WHERE project_id = ?""",
+            conn, params=(sel_id,)
+        )
+
+        # Xử lý tự động tương thích dữ liệu cũ nếu hồ sơ được tạo trước đó
+        if 'KL Hao hụt' in df_item_detail.columns:
+            for idx in df_item_detail.index:
+                if pd.isna(df_item_detail.at[idx, 'KL Hao hụt']) or df_item_detail.at[idx, 'KL Hao hụt'] == 0:
+                    net_v = df_item_detail.at[idx, 'KL Tịnh (Net)'] or 0
+                    gross_v = df_item_detail.at[idx, 'KL Tổng (Gross)'] or 0
+                    df_item_detail.at[idx, 'KL Hao hụt'] = round(gross_v - net_v, 3) if gross_v >= net_v else 0.0
+
+        if 'Mục chiết tính (I -> VII)' in df_item_detail.columns:
+            df_item_detail['Mục chiết tính (I -> VII)'] = df_item_detail['Mục chiết tính (I -> VII)'].fillna("II. VẬT TƯ CHÍNH")
+            df_item_detail['Vị trí'] = df_item_detail['Vị trí'].fillna("Theo bản vẽ")
+            df_item_detail['Ý nghĩa'] = df_item_detail['Ý nghĩa'].fillna("KL Net + Hao hụt = KL Gross xưởng xuất")
+            df_item_detail['Công thức tính'] = df_item_detail['Công thức tính'].fillna("Gross x Đơn giá")
+
+        # Hiển thị bảng toàn màn hình với chiều cao rộng rãi
+        st.dataframe(
+            df_item_detail[[
+                "Mục chiết tính (I -> VII)", "Code", "Vật tư / Hạng mục", "Vị trí", "ĐVT", 
+                "KL Tịnh (Net)", "% Hao hụt", "KL Hao hụt", "KL Tổng (Gross)", 
+                "Đơn giá", "Thành tiền", "Ý nghĩa", "Công thức tính"
+            ]].style.format({
+                "KL Tịnh (Net)": "{:.2f}",
+                "% Hao hụt": "{:.1f}%",
+                "KL Hao hụt": "{:.2f}",
+                "KL Tổng (Gross)": "{:.2f}",
+                "Đơn giá": "{:,.0f} đ",
+                "Thành tiền": "{:,.0f} đ"
+            }),
+            use_container_width=True,
+            height=550
+        )
+
+        buf_re = io.BytesIO()
+        with pd.ExcelWriter(buf_re, engine='openpyxl') as wr:
+            df_item_detail.to_excel(wr, index=False, sheet_name='ChietTinh_DayDu')
+        st.download_button(
+            f"📥 Tải file Excel chiết tính đầy đủ của hồ sơ #{sel_id}", 
+            data=buf_re.getvalue(), 
+            file_name=f"Chiết_Tính_Đầy_Đủ_ID_{sel_id}.xlsx", 
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
     conn.close()
 

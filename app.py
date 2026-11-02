@@ -23,10 +23,9 @@ st.set_page_config(
     layout="wide"
 )
 
-# Chống mờ chữ và ép bảng hiển thị sắc nét toàn diện
 st.markdown("""
 <style>
-    div[data-testid="stDataFrame"] {
+    div[data-testid="stDataFrame"], div[data-testid="stDataEditor"] {
         opacity: 1 !important;
         filter: none !important;
         width: 100% !important;
@@ -284,7 +283,7 @@ class ChiTietVatTu(BaseModel):
     waste_factor_percent: float
 
 class NhomChiTiet(BaseModel):
-    section_code: str  # I. VẬT TƯ THẦU PHỤ, II. VẬT TƯ CHÍNH, ...
+    section_code: str
     items: List[ChiTietVatTu]
 
 class TakeoffResult(BaseModel):
@@ -316,7 +315,7 @@ with st.sidebar:
     st.caption(f"Nguồn dữ liệu: `{SOURCE_INFO}`")
     st.caption(f"Đã nạp **{len(PRICE_MASTER)}** mã đơn giá Master.")
 
-tab1, tab2, tab3 = st.tabs(["📝 Bóc Tách Dự Toán Mới", "📂 Thư Viện Hồ Sơ Đã Lưu", "📊 Bảng Tra Đơn Giá Master"])
+tab1, tab2, tab3 = st.tabs(["📝 Bóc Tách Dự Toán Mới", "📂 Thư Viện Hồ Sơ & Chỉnh Sửa Chiết Tính", "📊 Bảng Tra Đơn Giá Master"])
 
 # TAB 1: BÓC TÁCH MỚI
 with tab1:
@@ -521,15 +520,14 @@ with tab1:
                         for rsk in data.get("technical_risks_and_notes", []):
                             st.info(f"• {rsk}")
 
-                        st.session_state['just_created_id'] = proj_id
-                        st.info("💡 Bạn có thể xem bảng chi tiết đầy đủ 100% chiều ngang tại tab 'Thư Viện Hồ Sơ Đã Lưu'.")
+                        st.info("💡 Chuyển sang tab **'📂 Thư Viện Hồ Sơ & Chỉnh Sửa Chiết Tính'** để xem, đổi mã code tự động dò master hoặc chỉnh sửa số liệu.")
 
                     except Exception as e:
                         st.error(f"Lỗi xử lý: {str(e)}")
 
-# TAB 2: THƯ VIỆN HỒ SƠ ĐÃ LƯU & BẢNG CHI TIẾT TOÀN MÀN HÌNH
+# TAB 2: THƯ VIỆN HỒ SƠ & BẢNG CHỈNH SỬA CHIẾT TÍNH (TỰ ĐỘNG DÒ CODE MASTER)
 with tab2:
-    st.subheader(f"📂 Thư Viện Hồ Sơ Dự Toán")
+    st.subheader(f"📂 Thư Viện Hồ Sơ & Chỉnh Sửa Chiết Tính")
     conn = sqlite3.connect(DB_FILE)
     
     query = """
@@ -584,12 +582,11 @@ with tab2:
         
         st.markdown("---")
         
-        # KHU VỰC THAO TÁC GỌN GÀNG TRÊN CÙNG
-        st.markdown("### 🛠️ Chọn Hồ Sơ & Thao Tác")
+        st.markdown("### 🛠️ Quản Trị & Thao Tác Hồ Sơ")
         sel_col1, sel_col2, sel_col3 = st.columns([1.5, 2.5, 1])
         
         with sel_col1:
-            sel_id = st.selectbox("Chọn ID hồ sơ cần xem:", df_saved["id"].tolist())
+            sel_id = st.selectbox("Chọn ID hồ sơ cần xem / chỉnh sửa:", df_saved["id"].tolist())
             selected_row = df_saved[df_saved["id"] == sel_id].iloc[0]
             st.caption(f"Hạng mục: **{selected_row['item_name']}** | Tạo bởi: **{selected_row['nguoi_tao']}**")
 
@@ -609,7 +606,7 @@ with tab2:
                     cur_u = conn.cursor()
                     cur_u.execute("UPDATE projects SET review_status = ?, review_note = ? WHERE id = ?", (new_status, new_note, sel_id))
                     conn.commit()
-                    st.success("Đã cập nhật!")
+                    st.success("Đã lưu kết quả kiểm duyệt!")
                     time.sleep(0.5)
                     st.rerun()
             else:
@@ -628,70 +625,165 @@ with tab2:
                     time.sleep(0.5)
                     st.rerun()
 
-        # BẢNG CHI TIẾT BOQ HIỂN THỊ TOÀN CHIỀU NGANG MÀN HÌNH (100% WIDTH)
         st.markdown("---")
-        st.markdown(f"### 📋 Bảng Chi Tiết Chiết Tính Đầy Đủ (Hồ Sơ #{sel_id})")
-        
-        df_item_detail = pd.read_sql_query(
-            """SELECT 
-                section_code AS 'Mục chiết tính (I -> VII)', 
-                material_code AS 'Code', 
-                description AS 'Vật tư / Hạng mục', 
-                location AS 'Vị trí',
-                unit AS 'ĐVT', 
-                net_qty AS 'KL Tịnh (Net)', 
-                waste_percent AS '% Hao hụt', 
-                waste_qty AS 'KL Hao hụt', 
-                gross_qty AS 'KL Tổng (Gross)', 
-                unit_cost AS 'Đơn giá', 
-                amount AS 'Thành tiền',
-                meaning AS 'Ý nghĩa',
-                formula AS 'Công thức tính'
-            FROM boq_items WHERE project_id = ?""",
-            conn, params=(sel_id,)
-        )
+        st.markdown(f"### ✏️ Bảng Chi Tiết Chiết Tính (Hồ Sơ #{sel_id})")
+        st.caption("💡 **Cơ chế dò mã Master:** Bạn có thể nhập/sửa trực tiếp mã ở cột **Code**. Hệ thống sẽ tự động tra cứu trong kho Master để cập nhật đúng **Tên vật tư**, **ĐVT** và **Đơn giá**.")
 
-        # Xử lý tự động tương thích dữ liệu cũ nếu hồ sơ được tạo trước đó
-        if 'KL Hao hụt' in df_item_detail.columns:
-            for idx in df_item_detail.index:
-                if pd.isna(df_item_detail.at[idx, 'KL Hao hụt']) or df_item_detail.at[idx, 'KL Hao hụt'] == 0:
-                    net_v = df_item_detail.at[idx, 'KL Tịnh (Net)'] or 0
-                    gross_v = df_item_detail.at[idx, 'KL Tổng (Gross)'] or 0
-                    df_item_detail.at[idx, 'KL Hao hụt'] = round(gross_v - net_v, 3) if gross_v >= net_v else 0.0
+        # Lấy dữ liệu hồ sơ vào session state để quản lý chỉnh sửa
+        state_key = f"df_edit_data_{sel_id}"
+        if state_key not in st.session_state:
+            df_init = pd.read_sql_query(
+                """SELECT 
+                    id AS item_db_id,
+                    section_code AS 'Mục chiết tính (I -> VII)', 
+                    material_code AS 'Code', 
+                    description AS 'Vật tư / Hạng mục', 
+                    location AS 'Vị trí',
+                    unit AS 'ĐVT', 
+                    net_qty AS 'KL Tịnh (Net)', 
+                    waste_percent AS '% Hao hụt', 
+                    gross_qty AS 'KL Tổng (Gross)', 
+                    unit_cost AS 'Đơn giá', 
+                    amount AS 'Thành tiền',
+                    meaning AS 'Ý nghĩa'
+                FROM boq_items WHERE project_id = ?""",
+                conn, params=(sel_id,)
+            )
+            df_init['Mục chiết tính (I -> VII)'] = df_init['Mục chiết tính (I -> VII)'].fillna("II. VẬT TƯ CHÍNH")
+            df_init['Vị trí'] = df_init['Vị trí'].fillna("Theo bản vẽ")
+            df_init['Ý nghĩa'] = df_init['Ý nghĩa'].fillna("KL Net + Hao hụt = KL Gross xưởng")
+            st.session_state[state_key] = df_init
 
-        if 'Mục chiết tính (I -> VII)' in df_item_detail.columns:
-            df_item_detail['Mục chiết tính (I -> VII)'] = df_item_detail['Mục chiết tính (I -> VII)'].fillna("II. VẬT TƯ CHÍNH")
-            df_item_detail['Vị trí'] = df_item_detail['Vị trí'].fillna("Theo bản vẽ")
-            df_item_detail['Ý nghĩa'] = df_item_detail['Ý nghĩa'].fillna("KL Net + Hao hụt = KL Gross xưởng xuất")
-            df_item_detail['Công thức tính'] = df_item_detail['Công thức tính'].fillna("Gross x Đơn giá")
+        # Nút tiện ích tự động quét đồng bộ lại tên và giá theo mã code
+        c_tool1, c_tool2 = st.columns([2, 3])
+        with c_tool1:
+            if st.button("🔍 Tự Động Tra Lại Tên & Giá Theo Mã Code", help="Tra cứu toàn bộ cột Code để lấy đúng tên vật tư và đơn giá Master"):
+                for idx in st.session_state[state_key].index:
+                    code_val = str(st.session_state[state_key].at[idx, 'Code']).strip()
+                    if code_val in PRICE_MASTER:
+                        master_item = PRICE_MASTER[code_val]
+                        st.session_state[state_key].at[idx, 'Vật tư / Hạng mục'] = master_item['name']
+                        st.session_state[state_key].at[idx, 'ĐVT'] = master_item['unit']
+                        st.session_state[state_key].at[idx, 'Đơn giá'] = master_item['unit_cost']
+                        # Tính lại Gross & Thành tiền
+                        net_q = float(st.session_state[state_key].at[idx, 'KL Tịnh (Net)'] or 0.0)
+                        w_pct = float(st.session_state[state_key].at[idx, '% Hao hụt'] or 0.0)
+                        gross_q = round(net_q * (1 + w_pct / 100.0), 3)
+                        st.session_state[state_key].at[idx, 'KL Tổng (Gross)'] = gross_q
+                        st.session_state[state_key].at[idx, 'Thành tiền'] = round(gross_q * master_item['unit_cost'], 0)
+                st.success("Đã đồng bộ lại toàn bộ vật tư theo mã Code!")
+                st.rerun()
 
-        # Hiển thị bảng toàn màn hình với chiều cao rộng rãi
-        st.dataframe(
-            df_item_detail[[
-                "Mục chiết tính (I -> VII)", "Code", "Vật tư / Hạng mục", "Vị trí", "ĐVT", 
-                "KL Tịnh (Net)", "% Hao hụt", "KL Hao hụt", "KL Tổng (Gross)", 
-                "Đơn giá", "Thành tiền", "Ý nghĩa", "Công thức tính"
-            ]].style.format({
-                "KL Tịnh (Net)": "{:.2f}",
-                "% Hao hụt": "{:.1f}%",
-                "KL Hao hụt": "{:.2f}",
-                "KL Tổng (Gross)": "{:.2f}",
-                "Đơn giá": "{:,.0f} đ",
-                "Thành tiền": "{:,.0f} đ"
-            }),
+        # Bảng dữ liệu có thể chỉnh sửa
+        edited_df = st.data_editor(
+            st.session_state[state_key],
             use_container_width=True,
-            height=550
+            num_rows="dynamic",
+            height=520,
+            key=f"editor_table_{sel_id}",
+            column_config={
+                "item_db_id": None,
+                "Mục chiết tính (I -> VII)": st.column_config.SelectboxColumn(
+                    "Mục chiết tính (I -> VII)",
+                    options=[
+                        "I. VẬT TƯ THẦU PHỤ",
+                        "II. VẬT TƯ CHÍNH",
+                        "III. HOÀN THIỆN (KIM LOẠI, PU...)",
+                        "IV. NHÂN CÔNG & VẬT LIỆU HOÀN THIỆN PHỤ",
+                        "V. BAO BÌ",
+                        "VI. PHỤ KIỆN",
+                        "VII. SOURCE NGOÀI"
+                    ],
+                    required=True
+                ),
+                "Code": st.column_config.TextColumn("Code (Mã Master)", required=True),
+                "Vật tư / Hạng mục": st.column_config.TextColumn("Vật tư / Hạng mục", required=True),
+                "Vị trí": st.column_config.TextColumn("Vị trí"),
+                "ĐVT": st.column_config.TextColumn("ĐVT", required=True),
+                "KL Tịnh (Net)": st.column_config.NumberColumn("KL Tịnh (Net)", min_value=0.0, format="%.2f"),
+                "% Hao hụt": st.column_config.NumberColumn("% Hao hụt", min_value=0.0, max_value=100.0, format="%.1f%%"),
+                "KL Tổng (Gross)": st.column_config.NumberColumn("KL Tổng (Gross)", disabled=True, format="%.2f"),
+                "Đơn giá": st.column_config.NumberColumn("Đơn giá", min_value=0.0, format="%d đ"),
+                "Thành tiền": st.column_config.NumberColumn("Thành tiền", disabled=True, format="%d đ"),
+                "Ý nghĩa": st.column_config.TextColumn("Ý nghĩa")
+            }
         )
 
-        buf_re = io.BytesIO()
-        with pd.ExcelWriter(buf_re, engine='openpyxl') as wr:
-            df_item_detail.to_excel(wr, index=False, sheet_name='ChietTinh_DayDu')
-        st.download_button(
-            f"📥 Tải file Excel chiết tính đầy đủ của hồ sơ #{sel_id}", 
-            data=buf_re.getvalue(), 
-            file_name=f"Chiết_Tính_Đầy_Đủ_ID_{sel_id}.xlsx", 
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        col_save_btn, col_exp_btn = st.columns([1.5, 3.5])
+        with col_save_btn:
+            if st.button("💾 Lưu thay đổi bảng chiết tính", type="primary", use_container_width=True):
+                cur_save = conn.cursor()
+                cur_save.execute("DELETE FROM boq_items WHERE project_id = ?", (sel_id,))
+                
+                new_total_direct = 0.0
+                
+                for _, row in edited_df.iterrows():
+                    s_code = str(row['Mục chiết tính (I -> VII)'])
+                    m_code = str(row['Code']).strip() if pd.notna(row['Code']) else "CHƯA_CÓ_MÃ"
+                    desc = str(row['Vật tư / Hạng mục']) if pd.notna(row['Vật tư / Hạng mục']) else ""
+                    loc = str(row['Vị trí']) if pd.notna(row['Vị trí']) else ""
+                    unit = str(row['ĐVT']) if pd.notna(row['ĐVT']) else "cái"
+                    
+                    net_q = float(row['KL Tịnh (Net)']) if pd.notna(row['KL Tịnh (Net)']) else 0.0
+                    w_pct = float(row['% Hao hụt']) if pd.notna(row['% Hao hụt']) else 0.0
+                    u_cost = float(row['Đơn giá']) if pd.notna(row['Đơn giá']) else 0.0
+                    
+                    # Tự động đồng bộ từ Master nếu mã Code trùng khớp với kho
+                    if m_code in PRICE_MASTER:
+                        master_data = PRICE_MASTER[m_code]
+                        # Nếu người dùng chưa gõ tên, tự động lấy tên Master
+                        if not desc or desc == "None":
+                            desc = master_data['name']
+                        if not unit or unit == "cái":
+                            unit = master_data['unit']
+                        if u_cost == 0.0:
+                            u_cost = master_data['unit_cost']
+
+                    # Tính toán lại các giá trị phụ thuộc
+                    waste_q = round(net_q * (w_pct / 100.0), 3)
+                    gross_q = round(net_q + waste_q, 3)
+                    amt = round(gross_q * u_cost, 0)
+                    new_total_direct += amt
+                    
+                    meaning = str(row['Ý nghĩa']) if pd.notna(row['Ý nghĩa']) else f"Đo vẽ {loc}"
+                    formula = f"Gross = {net_q:.2f} + {waste_q:.2f} -> {gross_q:.2f} x {u_cost:,.0f} đ"
+                    
+                    cur_save.execute('''
+                        INSERT INTO boq_items 
+                        (project_id, section_code, material_code, description, location, unit, net_qty, waste_percent, waste_qty, gross_qty, unit_cost, amount, meaning, formula)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        sel_id, s_code, m_code, desc, loc, unit,
+                        net_q, w_pct, waste_q, gross_q, u_cost, amt, meaning, formula
+                    ))
+
+                new_overhead = new_total_direct * (overhead_rate / 100.0)
+                new_tender = (new_total_direct + new_overhead) * (1 + profit_rate / 100.0)
+                
+                cur_save.execute('''
+                    UPDATE projects 
+                    SET direct_cost = ?, overhead_cost = ?, tender_price = ? 
+                    WHERE id = ?
+                ''', (new_total_direct, new_overhead, new_tender, sel_id))
+                
+                conn.commit()
+                # Xóa cache session state để nạp lại dữ liệu mới nhất
+                st.session_state.pop(state_key, None)
+                st.success(f"✅ Đã lưu thành công! Tổng chi phí mới: {new_total_direct:,.0f} đ | Giá chào thầu: {new_tender:,.0f} đ")
+                time.sleep(0.8)
+                st.rerun()
+
+        with col_exp_btn:
+            buf_re = io.BytesIO()
+            with pd.ExcelWriter(buf_re, engine='openpyxl') as wr:
+                df_to_export = edited_df.drop(columns=['item_db_id'], errors='ignore')
+                df_to_export.to_excel(wr, index=False, sheet_name='ChietTinh_SauChinhSua')
+            st.download_button(
+                f"📥 Tải file Excel chiết tính (đã cập nhật) của hồ sơ #{sel_id}", 
+                data=buf_re.getvalue(), 
+                file_name=f"Chiết_Tính_Cập_Nhật_ID_{sel_id}.xlsx", 
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
     conn.close()
 

@@ -57,6 +57,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 DB_FILE = "qs_multiuser.db"
+JSON_STORAGE_FILE = "saved_projects_backup.json"
 IMAGE_DIR = "uploaded_drawings"
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
@@ -78,36 +79,63 @@ def parse_dimensions(dim_str: str):
     return 2000.0, 450.0, 2000.0
 
 # -------------------------------------------------------------
-# 2. THUẬT TOÁN ĐỊNH MỨC NHÂN CÔNG TỰ ĐỘNG (LÀM TRÒN LỚN HƠN)
+# 2. CƠ CHẾ SAO LƯU & KHÔI PHỤC DỮ LIỆU CHỐNG MẤT KHI REBOOT
 # -------------------------------------------------------------
-def calculate_standard_labor(length_m: float, depth_m: float, height_m: float, specs_text: str):
-    s_face = max(length_m * height_m, 1.0)
-    spec_low = str(specs_text).lower()
+def sync_projects_to_json():
+    """Tự động xuất toàn bộ dữ liệu dự toán ra file JSON để chống mất khi server reboot"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        p_df = pd.read_sql_query("SELECT * FROM projects", conn)
+        b_df = pd.read_sql_query("SELECT * FROM boq_items", conn)
+        conn.close()
+        
+        backup_data = {
+            "projects": p_df.to_dict(orient="records"),
+            "boq_items": b_df.to_dict(orient="records")
+        }
+        with open(JSON_STORAGE_FILE, "w", encoding="utf-8") as f:
+            json.dump(backup_data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
-    base_prod_days = s_face * 0.35
-    if any(k in spec_low for k in ["sắt", "thép", "khung xương"]):
-        base_prod_days += 0.8
-    if any(k in spec_low for k in ["sơn pu", "sơn màu", "pu"]):
-        base_prod_days += 1.0
-    if any(k in spec_low for k in ["da", "leather", "bọc nệm"]):
-        base_prod_days += 0.8
-    if any(k in spec_low for k in ["đá", "nung kết", "líp mòi"]):
-        base_prod_days += 0.5
-    if any(k in spec_low for k in ["kính", "led", "nhôm kính"]):
-        base_prod_days += 0.8
-    
-    prod_days = max(math.ceil(base_prod_days), 1)
-
-    base_inst_days = s_face * 0.40
-    if any(k in spec_low for k in ["đá", "vách đá", "líp mòi"]):
-        base_inst_days += 1.0
-    if any(k in spec_low for k in ["kính", "cánh kính", "kịch trần"]):
-        base_inst_days += 1.0
-    if any(k in spec_low for k in ["inox", "la treo", "pvd"]):
-        base_inst_days += 0.5
-
-    inst_days = max(math.ceil(base_inst_days), 1)
-    return prod_days, inst_days
+def restore_projects_from_json():
+    """Tự động khôi phục dữ liệu từ JSON vào DB SQLite mới khi server bị khởi động lại"""
+    if not os.path.exists(JSON_STORAGE_FILE):
+        return
+    try:
+        with open(JSON_STORAGE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM projects")
+        if cur.fetchone()[0] == 0:
+            for p in data.get("projects", []):
+                cur.execute('''
+                    INSERT OR REPLACE INTO projects 
+                    (id, user_id, project_name, item_code, item_name, dimensions, specs, direct_cost, overhead_cost, tender_price, technical_risks, image_paths, created_at, review_status, review_note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    p.get("id"), p.get("user_id"), p.get("project_name"), p.get("item_code"), p.get("item_name"),
+                    p.get("dimensions"), p.get("specs"), p.get("direct_cost"), p.get("overhead_cost"), p.get("tender_price"),
+                    p.get("technical_risks"), p.get("image_paths"), p.get("created_at"), p.get("review_status"), p.get("review_note")
+                ))
+                
+            for b in data.get("boq_items", []):
+                cur.execute('''
+                    INSERT OR REPLACE INTO boq_items 
+                    (id, project_id, section_code, material_code, description, location, dai_m, rong_m, cao_m, so_luong, unit, net_qty, waste_percent, waste_qty, gross_qty, unit_cost, amount, meaning, formula)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    b.get("id"), b.get("project_id"), b.get("section_code"), b.get("material_code"), b.get("description"),
+                    b.get("location"), b.get("dai_m"), b.get("rong_m"), b.get("cao_m"), b.get("so_luong"),
+                    b.get("unit"), b.get("net_qty"), b.get("waste_percent"), b.get("waste_qty"), b.get("gross_qty"),
+                    b.get("unit_cost"), b.get("amount"), b.get("meaning"), b.get("formula")
+                ))
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -198,9 +226,42 @@ def init_db():
     conn.close()
 
 init_db()
+restore_projects_from_json()
 
 # -------------------------------------------------------------
-# 3. BỘ NẠP MASTER EXCEL TỐI ƯU BỘ NHỚ (TIẾT KIỆM RAM)
+# 3. THUẬT TOÁN ĐỊNH MỨC NHÂN CÔNG TỰ ĐỘNG (LÀM TRÒN LỚN HƠN)
+# -------------------------------------------------------------
+def calculate_standard_labor(length_m: float, depth_m: float, height_m: float, specs_text: str):
+    s_face = max(length_m * height_m, 1.0)
+    spec_low = str(specs_text).lower()
+
+    base_prod_days = s_face * 0.35
+    if any(k in spec_low for k in ["sắt", "thép", "khung xương"]):
+        base_prod_days += 0.8
+    if any(k in spec_low for k in ["sơn pu", "sơn màu", "pu"]):
+        base_prod_days += 1.0
+    if any(k in spec_low for k in ["da", "leather", "bọc nệm"]):
+        base_prod_days += 0.8
+    if any(k in spec_low for k in ["đá", "nung kết", "líp mòi"]):
+        base_prod_days += 0.5
+    if any(k in spec_low for k in ["kính", "led", "nhôm kính"]):
+        base_prod_days += 0.8
+    
+    prod_days = max(math.ceil(base_prod_days), 1)
+
+    base_inst_days = s_face * 0.40
+    if any(k in spec_low for k in ["đá", "vách đá", "líp mòi"]):
+        base_inst_days += 1.0
+    if any(k in spec_low for k in ["kính", "cánh kính", "kịch trần"]):
+        base_inst_days += 1.0
+    if any(k in spec_low for k in ["inox", "la treo", "pvd"]):
+        base_inst_days += 0.5
+
+    inst_days = max(math.ceil(base_inst_days), 1)
+    return prod_days, inst_days
+
+# -------------------------------------------------------------
+# 4. BỘ NẠP MASTER EXCEL TỐI ƯU BỘ NHỚ (TIẾT KIỆM RAM)
 # -------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_price_master():
@@ -317,7 +378,7 @@ def load_price_master():
 PRICE_MASTER, SOURCE_INFO = load_price_master()
 
 # -------------------------------------------------------------
-# 4. TRUY VẤN DỮ LIỆU ĐÃ DUYỆT ĐỂ AI HỌC HỎI (GROUND TRUTH)
+# 5. TRUY VẤN DỮ LIỆU ĐÃ DUYỆT ĐỂ AI HỌC HỎI (GROUND TRUTH)
 # -------------------------------------------------------------
 def get_approved_benchmark(item_code: str, item_name: str):
     conn = sqlite3.connect(DB_FILE)
@@ -352,7 +413,7 @@ def get_approved_benchmark(item_code: str, item_name: str):
     return bench_id, bench_text
 
 # -------------------------------------------------------------
-# 5. THUẬT TOÁN ĐỊNH DANH VẬT TƯ
+# 6. THUẬT TOÁN ĐỊNH DANH VẬT TƯ
 # -------------------------------------------------------------
 VALID_SECTIONS = [
     "I. VẬT TƯ THẦU PHỤ",
@@ -499,7 +560,7 @@ def clean_section_row(row):
     return "II. VẬT TƯ CHÍNH"
 
 # -------------------------------------------------------------
-# 6. QUẢN LÝ ĐĂNG NHẬP
+# 7. QUẢN LÝ ĐĂNG NHẬP
 # -------------------------------------------------------------
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
@@ -536,7 +597,7 @@ if not st.session_state['logged_in']:
     st.stop()
 
 # -------------------------------------------------------------
-# 7. CẤU TRÚC DỮ LIỆU ĐỊNH NGHĨA PHÂN RÃ CẤU KIỆN
+# 8. CẤU TRÚC DỮ LIỆU ĐỊNH NGHĨA PHÂN RÃ CẤU KIỆN
 # -------------------------------------------------------------
 class ChiTietVatTu(BaseModel):
     material_code: str
@@ -562,7 +623,7 @@ class TakeoffResult(BaseModel):
     technical_risks_and_notes: List[str]
 
 # -------------------------------------------------------------
-# 8. GIAO DIỆN CHÍNH
+# 9. GIAO DIỆN CHÍNH
 # -------------------------------------------------------------
 user = st.session_state['user_info']
 
@@ -589,6 +650,27 @@ with st.sidebar:
     
     st.caption(f"Nguồn dữ liệu: `{SOURCE_INFO}`")
     st.caption(f"Đã nạp **{len(PRICE_MASTER)}** mã đơn giá Master.")
+
+    st.markdown("---")
+    st.subheader("💾 Sao lưu & Khôi phục dữ liệu")
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "rb") as fp:
+            st.download_button(
+                "📥 Tải file Database (qs_multiuser.db)",
+                data=fp.read(),
+                file_name="qs_multiuser_backup.db",
+                mime="application/x-sqlite3",
+                use_container_width=True
+            )
+    if os.path.exists(JSON_STORAGE_FILE):
+        with open(JSON_STORAGE_FILE, "rb") as fp_j:
+            st.download_button(
+                "📥 Tải file JSON sao lưu hồ sơ",
+                data=fp_j.read(),
+                file_name="saved_projects_backup.json",
+                mime="application/json",
+                use_container_width=True
+            )
 
 tab1, tab2, tab3 = st.tabs(["📝 Bóc Tách Dự Toán Mới", "📂 Thư Viện Hồ Sơ & Chỉnh Sửa Chiết Tính", "📊 Quản Lý Đơn Giá Master"])
 
@@ -852,6 +934,8 @@ with tab1:
                         conn.commit()
                         conn.close()
 
+                        sync_projects_to_json()
+
                         if benchmark_context:
                             st.success(f"✅ Đã kế thừa và học tập 100% từ Hồ sơ chuẩn #{bench_id} lúc {created_time_vn} (Giờ VN)!")
                         else:
@@ -898,7 +982,7 @@ with tab2:
     df_saved = pd.read_sql_query(query, conn, params=params)
     
     if df_saved.empty:
-        st.info("Chưa có hồ sơ dự toán nào được lưu.")
+        st.info("Chưa có hồ sơ dự toán nào được lưu. Bạn có thể sang Tab 1 để bóc tách mới hoặc dùng chức năng khôi phục từ file Backup ở thanh bên trái.")
     else:
         df_display = df_saved.rename(columns={
             "id": "ID",
@@ -948,6 +1032,7 @@ with tab2:
                     cur_u = conn.cursor()
                     cur_u.execute("UPDATE projects SET review_status = ?, review_note = ? WHERE id = ?", (new_status, new_note, sel_id))
                     conn.commit()
+                    sync_projects_to_json()
                     if new_status == '✅ Đúng giá':
                         st.success(f"🎉 Đã lưu Hồ sơ #{sel_id} làm 'GROUND TRUTH' chuẩn mực để AI học hỏi các lần sau!")
                     else:
@@ -966,6 +1051,7 @@ with tab2:
                     cur_d.execute("DELETE FROM boq_items WHERE project_id = ?", (sel_id,))
                     cur_d.execute("DELETE FROM projects WHERE id = ?", (sel_id,))
                     conn.commit()
+                    sync_projects_to_json()
                     st.warning(f"Đã xóa hoàn toàn hồ sơ #{sel_id}.")
                     time.sleep(0.5)
                     st.rerun()
@@ -1005,7 +1091,6 @@ with tab2:
             with col_search_kw:
                 quick_filter = st.text_input("1. Gõ từ khóa tìm vật tư:", value="đá", placeholder="đá, da, mdf, nhân công, led...")
                 
-                # Chỉ lọc tối đa 30 kết quả phù hợp nhất để chống tràn RAM
                 matched_options = []
                 matched_map = {}
                 q_low = quick_filter.strip().lower()
@@ -1217,6 +1302,7 @@ with tab2:
                 ''', (new_total_direct, new_overhead, new_tender, sel_id))
                 
                 conn.commit()
+                sync_projects_to_json()
                 st.session_state.pop(state_key, None)
                 st.success(f"✅ Đã lưu thành công! Tổng chi phí mới: {new_total_direct:,.0f} đ | Giá chào thầu: {new_tender:,.0f} đ")
                 time.sleep(0.8)
@@ -1270,7 +1356,6 @@ with tab3:
         with c_search:
             search_kw = st.text_input("🔍 Tìm kiếm vật tư nhanh (gõ mã hoặc tên):", placeholder="Ví dụ: đá, da, mdf, thép, nhân công...")
 
-        # Chuyển đổi tối ưu không lưu bản sao nặng trong session_state
         items_list = []
         q_kw = search_kw.strip().lower()
         for k, v in PRICE_MASTER.items():
@@ -1286,7 +1371,6 @@ with tab3:
         total_found = len(items_list)
         st.caption(f"Tìm thấy **{total_found}** vật tư phù hợp.")
 
-        # Phân trang: Mỗi trang hiển thị 50 dòng để bảo vệ RAM
         page_size = 50
         total_pages = max(math.ceil(total_found / page_size), 1)
         
@@ -1299,7 +1383,6 @@ with tab3:
 
         df_page = pd.DataFrame(page_items)
 
-        # Cho phép chỉnh sửa trực tiếp 50 dòng của trang hiện tại
         edited_page_df = st.data_editor(
             df_page,
             use_container_width=True,
@@ -1325,7 +1408,6 @@ with tab3:
                         PRICE_MASTER[code_key]["unit"] = r["ĐVT"]
                         PRICE_MASTER[code_key]["unit_cost"] = float(r["ĐƠN GIÁ XƯỞNG"])
 
-                # Ghi lưu lại vào file Excel Master
                 full_export_list = [
                     {"MÃ CODE": k, "NHÓM": v.get("category", "CHUNG"), "TÊN VẬT TƯ / NHÂN CÔNG": v["name"], "ĐVT": v["unit"], "ĐƠN GIÁ XƯỞNG": v["unit_cost"]}
                     for k, v in PRICE_MASTER.items()

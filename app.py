@@ -3,6 +3,7 @@ import pandas as pd
 import json
 import io
 import os
+import re
 import time
 import math
 import sqlite3
@@ -234,7 +235,126 @@ def load_price_master():
 PRICE_MASTER, SOURCE_INFO = load_price_master()
 
 # -------------------------------------------------------------
-# 3. QUẢN LÝ ĐĂNG NHẬP
+# 3. THUẬT TOÁN SO KHỚP MÃ VẬT TƯ PHÂN TẦNG (CHỐNG NHẦM NHÓM)
+# -------------------------------------------------------------
+STOPWORDS_VN = {
+    "hệ", "mặt", "trong", "ngoài", "trên", "dưới", "theo", "mẫu", "màu", 
+    "loại", "tấm", "thanh", "bộ", "cái", "và", "của", "cho", "với", "các",
+    "phần", "khu", "vực", "tủ", "vách", "kệ", "đợt", "hông", "đáy", "nóc",
+    "cánh", "hậu", "ngăn", "kéo", "gia", "cố", "sau", "trước", "bên", "trái", "phải"
+}
+
+def is_code_allowed_for_section(section_code: str, p_code: str, p_name: str) -> bool:
+    """Kiểm tra mã Master có thuộc đúng phân nhóm chiết tính I -> VII hay không"""
+    sec = section_code.upper()
+    c_up = p_code.upper()
+    n_low = p_name.lower()
+
+    # Tuyệt đối không lấy mã lắp đặt (LĐ - ...) hoặc mã chỉ có 1 ký tự rời rạc cho các mục vật tư
+    is_install_or_labor = n_low.startswith("lđ -") or n_low.startswith("lđ-") or "nhân công" in n_low or "lắp đặt" in n_low
+    is_edge_banding = c_up.startswith("CC") or n_low.startswith("cc -") or "chỉ cạnh" in n_low or "chỉ nhựa" in n_low or "chỉ pvc" in n_low
+    is_stone = c_up.startswith("DA.") or c_up.startswith("ST.") or n_low.startswith("đá ")
+    is_glass = c_up.startswith("KI.") or n_low.startswith("kính ") or n_low.startswith("gương ")
+
+    if "II. VẬT TƯ CHÍNH" in sec:
+        # Vật tư chính chỉ lấy Gỗ, Ván MDF/MFC/Plywood/HDF/Gỗ ghép/Tấm nhựa/Cemboard
+        if is_install_or_labor or is_edge_banding or is_stone or is_glass:
+            return False
+        if len(c_up) <= 2:  # Loại bỏ mã rác 'y', 'x'
+            return False
+        return any(k in n_low for k in ["mdf", "mfc", "hdf", "plywood", "gỗ", "ván", "melamine", "laminate", "veneer", "acrylic", "pvc", "cemboard"])
+
+    elif "III. HOÀN THIỆN" in sec:
+        # Hoàn thiện: Chỉ cạnh (CC), Inox, Kim loại, Nhôm, Sơn PU
+        if is_install_or_labor or is_stone or is_glass:
+            return False
+        return is_edge_banding or any(k in n_low for k in ["inox", "nhôm", "sắt", "kim loại", "sơn", "pu", "pvd", "nẹp", "chỉ"])
+
+    elif "IV. NHÂN CÔNG" in sec:
+        # Nhân công & hoàn thiện phụ: Nhân công, sơn, dán phủ, keo vít
+        if is_stone or is_glass:
+            return False
+        return is_install_or_labor or any(k in n_low for k in ["nhân công", "sản xuất", "sơn", "laminate", "veneer", "keo", "phụ liệu", "vít", "công"])
+
+    elif "V. BAO BÌ" in sec:
+        return any(k in n_low for k in ["bao bì", "pe", "carton", "màng", "xốp", "đóng gói"]) or c_up.startswith("BB")
+
+    elif "VI. PHỤ KIỆN" in sec:
+        if is_stone or is_glass or is_edge_banding:
+            return False
+        return any(k in n_low for k in ["bản lề", "ray", "tay nắm", "khóa", "phụ kiện", "đèn", "led", "hafele", "blum", "ivan", "chốt", "bas", "cam"]) or c_up.startswith("PK")
+
+    elif "VII. SOURCE NGOÀI" in sec:
+        # Source ngoài: Đá, Kính, Gương, Màng căng
+        return is_stone or is_glass or any(k in n_low for k in ["đá", "kính", "gương", "màng căng", "xuyên sáng", "nệm", "da"])
+
+    return True
+
+def smart_match_master(section_code: str, raw_code: str, description: str, unit_hint: str):
+    """Tìm mã vật tư chính xác theo phân nhóm, từ khóa cốt lõi và độ dày"""
+    raw_c = str(raw_code).strip()
+    desc_low = str(description).lower().strip()
+
+    # 1. Nếu mã AI trả về có trong PRICE_MASTER và hợp lệ với nhóm Section -> Dùng ngay
+    if raw_c in PRICE_MASTER:
+        cand = PRICE_MASTER[raw_c]
+        if is_code_allowed_for_section(section_code, raw_c, cand["name"]):
+            return raw_c, cand
+
+    # 2. Tách các thông số kỹ thuật quan trọng từ mô tả của AI (ví dụ: độ dày 17mm, 9mm, 18mm, 5mm)
+    thickness_matches = re.findall(r'(\d+(?:\.\d+)?)\s*(?:mm|ly|li)', desc_low)
+    
+    # Tách từ khóa có nghĩa (loại bỏ stopwords)
+    words = [w for w in re.split(r'[,;\-\s_/\(\)\+]+', desc_low) if len(w) >= 2 and w not in STOPWORDS_VN]
+
+    best_code = None
+    best_data = None
+    best_score = 0.0
+
+    # Từ khóa vật liệu cốt lõi có trọng số cao (+3 điểm)
+    CORE_MATERIALS = {"mdf", "mfc", "plywood", "melamine", "laminate", "veneer", "acrylic", "sồi", "oak", "tần", "ash", "óc", "walnut", "inox", "pvd", "kính", "gương", "đá", "pu", "chống", "ẩm", "mmr", "lbr"}
+
+    for p_code, p_data in PRICE_MASTER.items():
+        p_name_low = p_data["name"].lower()
+
+        # Bước lọc 1: Phải đúng nhóm Section (I -> VII)
+        if not is_code_allowed_for_section(section_code, p_code, p_name_low):
+            continue
+
+        score = 0.0
+        p_tokens = set(re.split(r'[,;\-\s_/\(\)\+]+', p_name_low))
+
+        # Bước lọc 2: So khớp từng từ độc lập
+        for w in words:
+            if w in p_tokens:
+                score += 3.0 if w in CORE_MATERIALS else 1.5
+            elif len(w) >= 4 and w in p_name_low:
+                score += 1.0
+
+        # Bước lọc 3: Thưởng điểm lớn nếu khớp đúng độ dày (ví dụ: 17mm, 9mm, 5mm)
+        for th in thickness_matches:
+            if f"{th}mm" in p_name_low.replace(" ", "") or f"- {th}" in p_name_low or f" {th} " in p_name_low:
+                score += 4.0
+            else:
+                score -= 1.5  # Phạt nếu lệch độ dày
+
+        # Bước lọc 4: Khớp đơn vị tính
+        if unit_hint and unit_hint.lower() == p_data["unit"].lower():
+            score += 1.0
+
+        if score > best_score:
+            best_score = score
+            best_code = p_code
+            best_data = p_data
+
+    # Ngưỡng an toàn: Phải đạt ít nhất 4.0 điểm (ít nhất 1 từ khóa cốt lõi + 1 thuộc tính phụ/độ dày)
+    if best_score >= 4.0 and best_data:
+        return best_code, best_data
+
+    return "CHƯA_CÓ_MÃ", None
+
+# -------------------------------------------------------------
+# 4. QUẢN LÝ ĐĂNG NHẬP
 # -------------------------------------------------------------
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
@@ -272,7 +392,7 @@ if not st.session_state['logged_in']:
     st.stop()
 
 # -------------------------------------------------------------
-# 4. CẤU TRÚC DỮ LIỆU ĐỊNH NGHĨA CHO AI THEO CHUẨN 7 PHẦN (I -> VII)
+# 5. CẤU TRÚC DỮ LIỆU ĐỊNH NGHĨA CHO AI THEO CHUẨN 7 PHẦN (I -> VII)
 # -------------------------------------------------------------
 class ChiTietVatTu(BaseModel):
     material_code: str
@@ -293,7 +413,7 @@ class TakeoffResult(BaseModel):
     technical_risks_and_notes: List[str]
 
 # -------------------------------------------------------------
-# 5. GIAO DIỆN CHÍNH
+# 6. GIAO DIỆN CHÍNH
 # -------------------------------------------------------------
 user = st.session_state['user_info']
 
@@ -337,7 +457,7 @@ with tab1:
         specs = st.text_area(
             "Quy cách kỹ thuật & Vật liệu chỉ định:",
             height=130, 
-            value="- Khung gỗ tự nhiên hoàn thiện sơn màu chỉ định.\n- Vách và đợt tủ gỗ hoàn thiện theo mẫu.\n- Hệ tủ dưới: Thùng vách MDF chống ẩm dán Veneer.\n- Mặt tủ ốp đá tự nhiên/nung kết líp mòi.\n- Hệ tay nắm nhôm Hafele, bản lề giảm chấn và ray âm giảm chấn."
+            value="- Khung gỗ tự nhiên hoàn thiện sơn màu chỉ định.\n- Vách và đợt tủ gỗ hoàn thiện theo mẫu.\n- Hệ tủ dưới: Thùng vách MDF chống ẩm phủ Melamine 17mm, hậu 9mm.\n- Mặt tủ ốp đá tự nhiên/nung kết líp mòi.\n- Hệ tay nắm nhôm Hafele, bản lề giảm chấn và ray âm giảm chấn."
         )
 
         submit_btn = st.button("🚀 Bắt đầu bóc tách & Tính chiết tính", type="primary", use_container_width=True)
@@ -371,16 +491,16 @@ with tab1:
                         - Quy cách vật liệu:
                         {specs}
 
-                        PHÂN BỔ BẮT BUỘC ĐÚNG 7 NHÓM SAU (TÊN section_code BẮT BUỘC CHÍNH XÁC):
-                        I. VẬT TƯ THẦU PHỤ: Hạng mục gia công ngoài / nhà thầu phụ (nếu có).
-                        II. VẬT TƯ CHÍNH: Gỗ tự nhiên xẻ sấy, ván dán Plywood, ván cốt MDF/HDF chống ẩm, tấm Cemboard lót.
-                        III. HOÀN THIỆN (KIM LOẠI, PU...): Nẹp chỉ kim loại, thanh Inox La mạ PVD, khung nhôm viền.
-                        IV. NHÂN CÔNG & VẬT LIỆU HOÀN THIỆN PHỤ: Nhân công thợ mộc, sơn PU, ép dán Veneer/Laminate, keo/vít.
-                        V. BAO BÌ: Màng PE, bọc carton bảo vệ sản phẩm chống trầy.
-                        VI. PHỤ KIỆN: Bản lề giảm chấn, ray trượt âm, tay nắm nhôm, khóa.
-                        VII. SOURCE NGOÀI: Mặt bàn đá nung kết/đá tự nhiên líp mòi 45 độ, kính cánh tủ, màng xuyên sáng.
+                        QUY ĐỊNH PHÂN NHÓM NGHIÊM NGẶT (KHÔNG ĐƯỢC XẾP NHẦM NHÓM):
+                        - I. VẬT TƯ THẦU PHỤ: Chỉ gồm các hạng mục thuê gia công trọn gói bên ngoài (nếu không có thì để trống).
+                        - II. VẬT TƯ CHÍNH: Chỉ gồm Ván MDF/MFC/Plywood/Gỗ tự nhiên làm thùng, vách, đợt, hậu, cánh, khung xương gỗ. Ghi rõ tên vật tư kèm độ dày (ví dụ: 'MDF chống ẩm phủ Melamine 17mm', 'MDF chống ẩm phủ Melamine 9mm', 'Plywood chống ẩm 18mm'). TUYỆT ĐỐI KHÔNG đưa nhân công lắp đặt, đá, kính vào mục II.
+                        - III. HOÀN THIỆN (KIM LOẠI, PU...): Chỉ gồm Chỉ dán cạnh PVC/Veneer (md), Nẹp Inox PVD, Thanh nhôm định hình.
+                        - IV. NHÂN CÔNG & VẬT LIỆU HOÀN THIỆN PHỤ: Chỉ gồm Nhân công sản xuất/lắp đặt, Sơn PU hoàn thiện (m2), Gia công dán Laminate/Veneer, Phụ liệu keo vít.
+                        - V. BAO BÌ: Màng PE, xốp nổ, bìa carton bọc hàng (m2).
+                        - VI. PHỤ KIỆN: Bản lề giảm chấn (cái), Ray trượt ngăn kéo (bộ), Tay nắm (cái), Đèn LED.
+                        - VII. SOURCE NGOÀI: Đá mặt bàn/vách đá (m2), Kính cường lực/Gương (m2), Màng căng xuyên sáng (m2).
 
-                        Ghi rõ vị trí cụ thể (location) cho từng chi tiết.
+                        Trong trường `description`, phải ghi TÊN CHỦNG LOẠI VẬT TƯ chuẩn xác (kèm độ dày mm), còn vị trí lắp đặt ghi riêng vào trường `location`.
                         """
 
                         MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-3.1-pro']
@@ -394,7 +514,7 @@ with tab1:
                                         model=current_model,
                                         contents=[*images, prompt],
                                         config=types.GenerateContentConfig(
-                                            system_instruction="BẠN LÀ CHUYÊN GIA SENIOR QS NỘI THẤT. Bóc tách chiết tính 7 phần I -> VII chuẩn xác.",
+                                            system_instruction="BẠN LÀ CHUYÊN GIA SENIOR QS NỘI THẤT. Bóc tách chiết tính đúng 7 phần I -> VII, đặt tên vật tư chuẩn xác kèm độ dày mm.",
                                             response_mime_type="application/json",
                                             response_schema=TakeoffResult,
                                             temperature=0.0
@@ -419,36 +539,29 @@ with tab1:
                         total_direct = 0
                         boq_records = []
                         for section in data.get("breakdown_sections", []):
-                            s_code = section.get("section_code", "CHUNG")
+                            s_code = section.get("section_code", "II. VẬT TƯ CHÍNH")
                             for comp in section.get("items", []):
-                                code = str(comp.get("material_code", "")).strip()
-                                desc = comp.get("description", "").lower().strip()
+                                raw_code = str(comp.get("material_code", "")).strip()
+                                ai_desc = comp.get("description", "").strip()
                                 loc = comp.get("location", "").strip()
-                                unit_str = str(comp.get("unit", "cái")).strip().lower()
+                                unit_str = str(comp.get("unit", "cái")).strip()
                                 
-                                item_info = PRICE_MASTER.get(code)
-                                if not item_info and desc:
-                                    best_match = None
-                                    best_score = 0
-                                    clean_words = [w for w in desc.replace(",", " ").replace("-", " ").replace("/", " ").split() if len(w) > 2]
-                                    for p_code, p_data in PRICE_MASTER.items():
-                                        p_name_lower = p_data["name"].lower()
-                                        score = sum(1 for w in clean_words if w in p_name_lower)
-                                        if score > best_score:
-                                            best_score = score
-                                            best_match = p_data
-                                            code = p_code
-                                    if best_score >= 1:
-                                        item_info = best_match
+                                # Tra cứu thông minh có kiểm soát phân nhóm Section
+                                matched_code, item_info = smart_match_master(s_code, raw_code, ai_desc, unit_str)
 
-                                if not item_info:
-                                    item_info = {"name": comp.get("description"), "unit": comp.get("unit"), "unit_cost": 0.0}
+                                if item_info:
+                                    u_cost = item_info["unit_cost"]
+                                    final_desc = item_info["name"]
+                                    final_unit = item_info["unit"]
+                                else:
+                                    u_cost = 0.0
+                                    final_desc = ai_desc  # Giữ nguyên mô tả chuẩn của AI để QS dễ nhìn
+                                    final_unit = unit_str
 
-                                u_cost = item_info["unit_cost"]
                                 net_q = float(comp.get("net_quantity", 0.0))
                                 w_pct = float(comp.get("waste_factor_percent", 0.0))
 
-                                is_discrete = any(u in unit_str for u in ['cai', 'cái', 'bộ', 'bo', 'con', 'chiếc', 'chiec'])
+                                is_discrete = any(u in final_unit.lower() for u in ['cai', 'cái', 'bộ', 'bo', 'con', 'chiếc', 'chiec'])
                                 if is_discrete:
                                     waste_q = math.ceil(net_q * (w_pct / 100.0)) if w_pct > 0 else 0
                                     gross_q = net_q + waste_q
@@ -464,10 +577,10 @@ with tab1:
 
                                 boq_records.append({
                                     "section_code": s_code,
-                                    "material_code": code if code else "CHƯA_CÓ_MÃ",
-                                    "description": comp.get("description"),
+                                    "material_code": matched_code,
+                                    "description": final_desc,
                                     "location": loc,
-                                    "unit": item_info.get("unit", comp.get("unit")),
+                                    "unit": final_unit,
                                     "net_qty": net_q,
                                     "waste_percent": w_pct,
                                     "waste_qty": waste_q,
@@ -627,9 +740,8 @@ with tab2:
 
         st.markdown("---")
         st.markdown(f"### ✏️ Bảng Chi Tiết Chiết Tính (Hồ Sơ #{sel_id})")
-        st.caption("💡 **Cơ chế dò mã Master:** Bạn có thể nhập/sửa trực tiếp mã ở cột **Code**. Hệ thống sẽ tự động tra cứu trong kho Master để cập nhật đúng **Tên vật tư**, **ĐVT** và **Đơn giá**.")
+        st.caption("💡 **Cơ chế dò mã Master:** Bạn có thể nhập/sửa trực tiếp mã ở cột **Code (Mã Master)** rồi bấm **'🔍 Tự Động Tra Lại Tên & Giá Theo Mã Code'** hoặc bấm **Lưu** để hệ thống tự động điền đúng Tên vật tư, ĐVT và Đơn giá.")
 
-        # Lấy dữ liệu hồ sơ vào session state để quản lý chỉnh sửa
         state_key = f"df_edit_data_{sel_id}"
         if state_key not in st.session_state:
             df_init = pd.read_sql_query(
@@ -653,26 +765,6 @@ with tab2:
             df_init['Vị trí'] = df_init['Vị trí'].fillna("Theo bản vẽ")
             df_init['Ý nghĩa'] = df_init['Ý nghĩa'].fillna("KL Net + Hao hụt = KL Gross xưởng")
             st.session_state[state_key] = df_init
-
-        # Nút tiện ích tự động quét đồng bộ lại tên và giá theo mã code
-        c_tool1, c_tool2 = st.columns([2, 3])
-        with c_tool1:
-            if st.button("🔍 Tự Động Tra Lại Tên & Giá Theo Mã Code", help="Tra cứu toàn bộ cột Code để lấy đúng tên vật tư và đơn giá Master"):
-                for idx in st.session_state[state_key].index:
-                    code_val = str(st.session_state[state_key].at[idx, 'Code']).strip()
-                    if code_val in PRICE_MASTER:
-                        master_item = PRICE_MASTER[code_val]
-                        st.session_state[state_key].at[idx, 'Vật tư / Hạng mục'] = master_item['name']
-                        st.session_state[state_key].at[idx, 'ĐVT'] = master_item['unit']
-                        st.session_state[state_key].at[idx, 'Đơn giá'] = master_item['unit_cost']
-                        # Tính lại Gross & Thành tiền
-                        net_q = float(st.session_state[state_key].at[idx, 'KL Tịnh (Net)'] or 0.0)
-                        w_pct = float(st.session_state[state_key].at[idx, '% Hao hụt'] or 0.0)
-                        gross_q = round(net_q * (1 + w_pct / 100.0), 3)
-                        st.session_state[state_key].at[idx, 'KL Tổng (Gross)'] = gross_q
-                        st.session_state[state_key].at[idx, 'Thành tiền'] = round(gross_q * master_item['unit_cost'], 0)
-                st.success("Đã đồng bộ lại toàn bộ vật tư theo mã Code!")
-                st.rerun()
 
         # Bảng dữ liệu có thể chỉnh sửa
         edited_df = st.data_editor(
@@ -709,8 +801,28 @@ with tab2:
             }
         )
 
-        col_save_btn, col_exp_btn = st.columns([1.5, 3.5])
-        with col_save_btn:
+        # Nút tiện ích tra cứu lại theo mã Code vừa gõ trên bảng edited_df
+        c_tool1, c_tool2, c_tool3 = st.columns([1.8, 1.8, 2.4])
+        with c_tool1:
+            if st.button("🔍 Tự Động Tra Lại Tên & Giá Theo Mã Code", use_container_width=True):
+                updated_df = edited_df.copy()
+                for idx in updated_df.index:
+                    code_val = str(updated_df.at[idx, 'Code']).strip()
+                    if code_val in PRICE_MASTER:
+                        master_item = PRICE_MASTER[code_val]
+                        updated_df.at[idx, 'Vật tư / Hạng mục'] = master_item['name']
+                        updated_df.at[idx, 'ĐVT'] = master_item['unit']
+                        updated_df.at[idx, 'Đơn giá'] = master_item['unit_cost']
+                        net_q = float(updated_df.at[idx, 'KL Tịnh (Net)'] or 0.0)
+                        w_pct = float(updated_df.at[idx, '% Hao hụt'] or 0.0)
+                        gross_q = round(net_q * (1 + w_pct / 100.0), 3)
+                        updated_df.at[idx, 'KL Tổng (Gross)'] = gross_q
+                        updated_df.at[idx, 'Thành tiền'] = round(gross_q * master_item['unit_cost'], 0)
+                st.session_state[state_key] = updated_df
+                st.success("✅ Đã cập nhật đúng Tên vật tư, ĐVT và Đơn giá từ mã Code Master!")
+                st.rerun()
+
+        with c_tool2:
             if st.button("💾 Lưu thay đổi bảng chiết tính", type="primary", use_container_width=True):
                 cur_save = conn.cursor()
                 cur_save.execute("DELETE FROM boq_items WHERE project_id = ?", (sel_id,))
@@ -728,18 +840,14 @@ with tab2:
                     w_pct = float(row['% Hao hụt']) if pd.notna(row['% Hao hụt']) else 0.0
                     u_cost = float(row['Đơn giá']) if pd.notna(row['Đơn giá']) else 0.0
                     
-                    # Tự động đồng bộ từ Master nếu mã Code trùng khớp với kho
+                    # Nếu mã Code hợp lệ trong Master và người dùng vừa đổi mã, tự động lấy thông tin chuẩn từ Master
                     if m_code in PRICE_MASTER:
                         master_data = PRICE_MASTER[m_code]
-                        # Nếu người dùng chưa gõ tên, tự động lấy tên Master
-                        if not desc or desc == "None":
-                            desc = master_data['name']
-                        if not unit or unit == "cái":
-                            unit = master_data['unit']
-                        if u_cost == 0.0:
+                        desc = master_data['name']
+                        unit = master_data['unit']
+                        if u_cost == 0.0 or u_cost != master_data['unit_cost']:
                             u_cost = master_data['unit_cost']
 
-                    # Tính toán lại các giá trị phụ thuộc
                     waste_q = round(net_q * (w_pct / 100.0), 3)
                     gross_q = round(net_q + waste_q, 3)
                     amt = round(gross_q * u_cost, 0)
@@ -767,22 +875,22 @@ with tab2:
                 ''', (new_total_direct, new_overhead, new_tender, sel_id))
                 
                 conn.commit()
-                # Xóa cache session state để nạp lại dữ liệu mới nhất
                 st.session_state.pop(state_key, None)
                 st.success(f"✅ Đã lưu thành công! Tổng chi phí mới: {new_total_direct:,.0f} đ | Giá chào thầu: {new_tender:,.0f} đ")
                 time.sleep(0.8)
                 st.rerun()
 
-        with col_exp_btn:
+        with c_tool3:
             buf_re = io.BytesIO()
             with pd.ExcelWriter(buf_re, engine='openpyxl') as wr:
                 df_to_export = edited_df.drop(columns=['item_db_id'], errors='ignore')
                 df_to_export.to_excel(wr, index=False, sheet_name='ChietTinh_SauChinhSua')
             st.download_button(
-                f"📥 Tải file Excel chiết tính (đã cập nhật) của hồ sơ #{sel_id}", 
+                f"📥 Tải file Excel chiết tính (#{sel_id})", 
                 data=buf_re.getvalue(), 
                 file_name=f"Chiết_Tính_Cập_Nhật_ID_{sel_id}.xlsx", 
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
             )
 
     conn.close()

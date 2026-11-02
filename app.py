@@ -506,7 +506,7 @@ with tab1:
                         - VII. SOURCE NGOÀI: Cánh kính khung nhôm/kính cường lực (m2), Đá tự nhiên/nung kết (m2), Gương kính.
                         """
 
-                        MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-3.1-pro']
+                        MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-3.5-flash-lite']
                         response = None
                         last_err = None
 

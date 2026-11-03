@@ -202,7 +202,7 @@ init_db()
 restore_projects_from_json()
 
 # -------------------------------------------------------------
-# 3. THUẬT TOÁN ĐỊNH MỨC NHÂN CÔNG TỔNG QUÁT (TÍCH HỢP QUY TẮC RỦI RO)
+# 3. THUẬT TOÁN ĐỊNH MỨC NHÂN CÔNG
 # -------------------------------------------------------------
 def calculate_dynamic_labor(length_m: float, depth_m: float, height_m: float, item_name: str, specs_text: str, is_night_shift: bool, is_high_access: bool):
     name_low = str(item_name).lower()
@@ -231,8 +231,8 @@ def calculate_dynamic_labor(length_m: float, depth_m: float, height_m: float, it
         base_ld = 1.0
     else:
         area = max(length_m * height_m, 1.0)
-        base_sx = area * 0.35
-        base_ld = area * 0.40
+        base_sx = area * 0.45  # Tăng định mức xưởng cho hệ tủ khối
+        base_ld = area * 0.50
 
     if any(k in spec_low for k in ["sơn pu", "sơn màu", "sơn hiệu ứng"]):
         base_sx += 1.0
@@ -243,11 +243,10 @@ def calculate_dynamic_labor(length_m: float, depth_m: float, height_m: float, it
     if any(k in spec_low for k in ["da", "nệm"]) and not is_ceiling:
         base_sx += 0.5
 
-    # Tích hợp Quy tắc 6 & 12 (Thi công đêm & Không gian khó)
     if is_high_access:
-        base_ld = base_ld / 0.7  # Giảm 30% năng suất -> Tăng công
+        base_ld = base_ld / 0.7 
     if is_night_shift:
-        base_ld = base_ld * 1.5  # Phụ phí làm đêm
+        base_ld = base_ld * 1.5
 
     prod_days = max(math.ceil(base_sx), 1)
     inst_days = max(math.ceil(base_ld), 1)
@@ -367,6 +366,9 @@ def load_price_master():
 
 PRICE_MASTER, SOURCE_INFO = load_price_master()
 
+# -------------------------------------------------------------
+# 5. TRUY VẤN HỒ SƠ ĐỐI SOÁT CÙNG LOẠI
+# -------------------------------------------------------------
 def get_approved_benchmark(item_code: str, item_name: str):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -400,7 +402,7 @@ def get_approved_benchmark(item_code: str, item_name: str):
     return bench_id, bench_text
 
 # -------------------------------------------------------------
-# 5. THUẬT TOÁN ĐỊNH DANH VẬT TƯ & XỬ LÝ QUY ĐỔI KHỐI TÍCH
+# 6. THUẬT TOÁN ĐỊNH DANH VẬT TƯ & XỬ LÝ QUY ĐỔI
 # -------------------------------------------------------------
 VALID_SECTIONS = [
     "I. VẬT TƯ THẦU PHỤ",
@@ -621,9 +623,9 @@ with tab1:
     with c1:
         st.subheader("1. Dữ liệu bản vẽ & Thông số kỹ thuật")
         project_name = st.text_input("Tên dự án / Công trình:", value="Biệt thự Park City")
-        item_code = st.text_input("Mã sản phẩm / Hạng mục:", value="TG-01")
-        item_name = st.text_input("Tên sản phẩm:", value="Trần gỗ tiêu âm phòng khách")
-        dimensions = st.text_input("Kích thước bao (DxRxC mm):", value="4095 x 2625 x 100 mm")
+        item_code = st.text_input("Mã sản phẩm / Hạng mục:", value="SP12")
+        item_name = st.text_input("Tên sản phẩm:", value="Tủ rượu")
+        dimensions = st.text_input("Kích thước bao (DxRxC mm):", value="4095 x 450 x 2600 mm")
         
         uploaded_files = st.file_uploader("Upload ảnh 3D hoặc bản vẽ kỹ thuật:", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
         if uploaded_files:
@@ -635,7 +637,7 @@ with tab1:
         specs = st.text_area(
             "Quy cách kỹ thuật & Vật liệu chỉ định:",
             height=140, 
-            value="- Khung xương thép hộp 20x40x1.2mm bắt ty treo chống rung (đan ô 500x500mm, tính theo mét dài md).\n- Tấm ốp trần MDF chống ẩm phủ Melamine/Veneer sồi (tính theo m2 mặt bằng trần).\n- Phào cổ trần và nẹp chỉ viền gỗ tự nhiên chạy quanh chu vi (tính theo mét dài md).\n- Đèn rãnh LED hắt trần viền xung quanh."
+            value="- THÂN TỦ & THÙNG VÁCH: MDF chống ẩm phủ Melamine 17mm (ANC.MEL.3.03), Hậu ván 9mm (ANC.MEL.3.01).\n- KHUNG GIA CỐ: Thép hộp 20x40x1.2mm, Len chân nhựa 100mm.\n- HỆ KỆ TREO: Thanh inox la treo 5x15mm mạ PVD, đợt tủ gỗ hoàn thiện sơn màu chỉ định.\n- MẶT TỦ VÀ VÁCH TRANG TRÍ: Ốp đá tự nhiên líp mòi 45 độ.\n- MẶT HẬU KHOANG RƯỢU: Ốp mút bọc DA TAM TÍNH.\n- CÁNH TỦ: Cánh kính cường lực 5mm khung nhôm, phụ kiện giảm chấn."
         )
 
         submit_btn = st.button("🚀 Bắt đầu bóc tách (Áp dụng 15 Quy tắc QS)", type="primary", use_container_width=True)
@@ -666,36 +668,54 @@ with tab1:
                         d_m = d_mm / 1000.0
                         h_m = h_mm / 1000.0
 
-                        area_ceiling = round(l_m * d_m, 2)
-                        perimeter_ceiling = round((l_m + d_m) * 2, 2)
-
                         prod_days_calc, inst_days_calc = calculate_dynamic_labor(l_m, d_m, h_m, item_name, specs, is_night_shift, is_high_access)
                         bench_id, benchmark_context = get_approved_benchmark(item_code, item_name)
 
-                        # NHÚNG 15 QUY TẮC QS NÂNG CAO VÀO PROMPT CHO GEMINI
+                        # TỰ ĐỘNG ĐỊNH TUYẾN CẤU TRÚC THEO NHÓM SẢN PHẨM TRÁNH AI BỊ "LƯỜI"
+                        name_low = str(item_name).lower()
+                        if any(k in name_low for k in ["tủ", "kệ", "cabinet", "wardrobe"]):
+                            structural_hint = """
+                            - BẮT BUỘC BÓC ĐẦY ĐỦ CÁC THÀNH PHẦN CỦA HỆ TỦ KỆ (Thường từ 15 - 30 dòng cấu kiện):
+                              + Khung xương thép hộp gia cố móng tủ/vách (md).
+                              + Thùng tủ, vách chia, hông tủ, đợt kệ (MDF 17mm - m2). Bắt buộc bóc đủ số lượng tấm!
+                              + Mặt hậu tủ (MDF 9mm - m2).
+                              + Mặt kệ / Vách ốp lưng (Đá/Da nếu có trong spec - m2).
+                              + Cánh tủ (Kính/Khung nhôm/Gỗ - m2).
+                              + Phụ kiện (Bản lề, ray, LED, Len chân).
+                            - YÊU CẦU ĐẶC BIỆT: TỦ LỚN PHẢI BÓC CHI TIẾT TỪNG MẢNG, TUYỆT ĐỐI KHÔNG GỘP THÀNH 1-2 DÒNG CHO CẢ CÁI TỦ!
+                            """
+                        elif any(k in name_low for k in ["trần", "vách", "ốp", "ceiling", "panel"]):
+                            structural_hint = """
+                            - BẮT BUỘC BÓC CÁC THÀNH PHẦN TRẦN/VÁCH:
+                              + Khung xương thép hộp / ty treo (md).
+                              + Tấm nền / Tấm ốp bề mặt (m2).
+                              + Phào / Chỉ nẹp viền quanh chu vi (md).
+                            - KHÔNG TỰ BỊA ĐÁ, DA, BẢN LỀ VÀO TRẦN VÁCH NẾU KHÔNG CÓ TRONG BẢN VẼ.
+                            """
+                        else:
+                            structural_hint = "- Bóc tách đầy đủ toàn bộ các thành phần cấu tạo nên sản phẩm."
+
                         prompt = f"""
                         BẠN LÀ SENIOR QS NỘI THẤT. BÓC TÁCH CHI TIẾT TỪNG TẤM VÀO ĐÚNG 7 TRƯỜNG DỮ LIỆU:
                         - Tên sản phẩm: {item_name}
                         - Mã sản phẩm: {item_code}
-                        - Kích thước phủ bì: Dài {l_m:.3f}m x Rộng {d_m:.3f}m x Dày {h_m:.3f}m.
+                        - Kích thước phủ bì: Dài {l_m:.3f}m x Rộng {d_m:.3f}m x Dày/Cao {h_m:.3f}m.
+
+                        {structural_hint}
 
                         --- 15 QUY TẮC QS NÂNG CAO BẮT BUỘC ÁP DỤNG TRONG DATA TRẢ VÊ ---
-                        1. Vật liệu nền: Bếp/Lavabo -> Tự động bóc cốt chống ẩm/Picomat. Khẩu độ đợt tủ >800mm -> bóc 2 lớp ván (kẹp đôi 34mm).
-                        2. Vách ốp nền: Ốp ván/nỉ -> bóc thêm xương Plywood. Ốp Đá đụng trần -> bóc thêm Khung sắt mạ kẽm gia cố pát Inox (10kg/m2).
-                        3. Hoàn thiện: Ép Laminate/Veneer -> Bắt buộc bóc thêm lớp Balance mặt sau. Diện tích sơn -> m2 khai triển x 1.15 (sơn 1 mặt) hoặc x 2.15 (sơn 2 mặt).
-                        4. Phụ kiện: L_ray = Floor((Sâu - 50)/50)*50. Bản lề: Cao <1200(2 cái), 1200-1600(3 cái), 1600-2200(4 cái). LED -> bóc trọn combo (Nhôm + LED + Nguồn + Cảm biến).
-                        5. Inox/Sắt: Tính theo cây 6m (hao hụt cắt 40%). Mạ PVD tủ rỗng cồng kềnh -> Note vào 'technical_risks_and_notes' để nhân 3 đơn giá. Bắt buộc bóc nhân công mài bóng mối hàn.
-                        6. Kính/Gương: Bất kỳ tấm nào < 0.3 m2 -> Ép làm tròn số lượng m2 thành 0.3. 
-                        7. Đá: Đá lật vân (Bookmatch) hao hụt 50%. Luôn bóc dịch vụ mài cạnh, khoét lỗ.
-                        8. Rèm vải: Độ chun vải S-fold x2.5, Xếp ly x2.2.
-                        9. Mộc treo ngàm: Bắt lên tường thạch cao -> Bóc thêm hệ xương sắt/ván plywood ngâm giấu trong vách.
-                        10. Đơn vị tính: Khung sắt (md), Ván/Đá/Kính (m2), Phào nẹp len chân (md).
+                        1. Khẩu độ đợt tủ >800mm -> bóc 2 lớp ván (kẹp đôi). Bếp/Lavabo -> Cốt chống ẩm/Picomat.
+                        2. Ép Laminate/Veneer -> Bóc thêm lớp Balance mặt sau. Diện tích sơn -> m2 mặt x 1.15 hoặc 2.15.
+                        3. L_ray = Floor((Sâu - 50)/50)*50. Bản lề: <1200(2 cái), 1200-1600(3 cái), 1600-2200(4 cái). LED -> (Nhôm + LED + Nguồn + Cảm biến).
+                        4. Kính/Gương: Mọi tấm < 0.3 m2 -> Ép làm tròn 0.3 m2. 
+                        5. Đá lật vân (Bookmatch) hao hụt 50%. Luôn bóc mài cạnh, khoét lỗ.
+                        6. Rèm vải: Độ chun S-fold x2.5, Xếp ly x2.2.
+                        7. Inox/Sắt: Hao hụt cắt 40%. Bắt buộc bóc nhân công mài bóng mối hàn.
+                        8. Đơn vị tính BẮT BUỘC: Khung sắt (md), Ván/Đá/Kính (m2), Phào nẹp len chân (md).
 
                         ĐỊNH MỨC NHÂN CÔNG BẮT BUỘC ĐƯA VÀO SEC_4_NHAN_CONG:
                         - Dòng 1: material_code='NC-SX', description='NC-SX: Nhân công sản xuất xưởng (Định mức)', ĐVT='Công', SL={prod_days_calc}, hao hụt=0.
                         - Dòng 2: material_code='NC-LD', description='NC-LD: Nhân công lắp đặt công trình (Định mức)', ĐVT='Công', SL={inst_days_calc}, hao hụt=0.
-
-                        TUYỆT ĐỐI KHÔNG BÓC ĐÁ HAY DA VÀO MỤC VII NẾU BẢN VẼ CHỈ LÀ TRẦN GỖ HAY SẢN PHẨM KHÔNG CÓ THÀNH PHẦN NÀY.
                         """
 
                         if benchmark_context:
@@ -717,7 +737,7 @@ with tab1:
                                         model=current_model,
                                         contents=[*images, prompt],
                                         config=types.GenerateContentConfig(
-                                            system_instruction="BẠN LÀ SENIOR QS NỘI THẤT. Áp dụng 15 quy tắc QS nâng cao, đảm bảo chính xác ĐVT và không bịa vật tư.",
+                                            system_instruction="BẠN LÀ SENIOR QS NỘI THẤT. Bóc tách cực kỳ chi tiết tất cả các cấu kiện, cấm gộp tắt, đảm bảo đúng đơn vị đo (m2/md) và áp dụng 15 quy tắc QS.",
                                             response_mime_type="application/json",
                                             response_schema=TakeoffResult,
                                             temperature=0.0
@@ -913,7 +933,7 @@ with tab2:
     df_saved = pd.read_sql_query(query, conn, params=params)
     
     if df_saved.empty:
-        st.info("Chưa có hồ sơ dự toán nào được lưu. Bạn có thể sang Tab 1 để bóc tách mới!")
+        st.info("Chưa có hồ sơ dự toán nào được lưu. Bạn có thể sang Tab 1 để bóc tách mới sản phẩm bất kỳ!")
     else:
         df_display = df_saved.rename(columns={
             "id": "ID",
@@ -955,7 +975,7 @@ with tab2:
                 
                 c_rev1, c_rev2 = st.columns([1.5, 2.5])
                 with c_rev1:
-                    new_status = st.radio("Đánh giá của Admin:", status_options, index=status_idx, horizontal=True)
+                    new_status = st.radio("Đánh giá Admin:", status_options, index=status_idx, horizontal=True)
                 with c_rev2:
                     new_note = st.text_input("Ghi chú Admin:", value=selected_row['review_note'] if pd.notna(selected_row['review_note']) else '')
                 
@@ -1044,7 +1064,7 @@ with tab2:
 
         c_tool1, c_tool2, c_tool3 = st.columns([2.4, 1.8, 1.8])
         with c_tool1:
-            if st.button("🔍 Đồng Bộ & Chuẩn Hóa Lại Khối Lượng m2/md/m3", use_container_width=True):
+            if st.button("🔍 Tra Cứu & Đồng Bộ Giá Tự Động Theo Tên", use_container_width=True):
                 updated_df = edited_df.copy()
                 match_count = 0
                 for idx in updated_df.index:
@@ -1054,38 +1074,25 @@ with tab2:
                     sec_val = str(updated_df.at[idx, 'Mục chiết tính (I -> VII)']).strip()
                     cost_val = float(updated_df.at[idx, 'Đơn giá'] or 0.0)
 
-                    d_m = float(updated_df.at[idx, 'Dài (m)'] or 0.0)
-                    r_m = float(updated_df.at[idx, 'Rộng (m)'] or 0.0)
-                    c_m = float(updated_df.at[idx, 'Cao (m)'] or 0.0)
-                    sl = float(updated_df.at[idx, 'SL'] or 1.0)
-                    w_pct = float(updated_df.at[idx, '% Hao hụt'] or 0.0)
-                    unit_v = str(updated_df.at[idx, 'ĐVT'])
-
-                    target_sec, found_code, master_item = resolve_material_master(sec_val, code_val, desc_val, loc_val, unit_v)
+                    target_sec, found_code, master_item = resolve_material_master(sec_val, code_val, desc_val, loc_val, str(updated_df.at[idx, 'ĐVT']))
                     
-                    if master_item:
-                        code_val = found_code
-                        desc_val = master_item['name']
-                        unit_v = master_item['unit']
-                        cost_val = master_item['unit_cost']
-
-                    net_q = calculate_clean_net_quantity(d_m, r_m, c_m, sl, unit_v, desc_val)
-                    waste_q = round(net_q * (w_pct / 100.0), 4 if "m3" in unit_v.lower() else 3)
-                    gross_q = round(net_q + waste_q, 4 if "m3" in unit_v.lower() else 3)
-
-                    updated_df.at[idx, 'Mục chiết tính (I -> VII)'] = target_sec
-                    updated_df.at[idx, 'Code'] = code_val
-                    updated_df.at[idx, 'Vật tư / Hạng mục'] = desc_val
-                    updated_df.at[idx, 'ĐVT'] = unit_v
-                    updated_df.at[idx, 'Đơn giá'] = cost_val
-                    updated_df.at[idx, 'KL Tịnh (Net)'] = net_q
-                    updated_df.at[idx, 'KL Tổng (Gross)'] = gross_q
-                    updated_df.at[idx, 'Thành tiền'] = round(gross_q * cost_val, 0)
-                    match_count += 1
+                    if master_item and (cost_val == 0.0 or code_val != found_code or sec_val != target_sec):
+                        updated_df.at[idx, 'Mục chiết tính (I -> VII)'] = target_sec
+                        updated_df.at[idx, 'Code'] = found_code
+                        updated_df.at[idx, 'Vật tư / Hạng mục'] = master_item['name']
+                        updated_df.at[idx, 'ĐVT'] = master_item['unit']
+                        updated_df.at[idx, 'Đơn giá'] = master_item['unit_cost']
+                        
+                        net_q = float(updated_df.at[idx, 'KL Tịnh (Net)'] or 1.0)
+                        w_pct = float(updated_df.at[idx, '% Hao hụt'] or 0.0)
+                        gross_q = round(net_q * (1 + w_pct / 100.0), 3)
+                        updated_df.at[idx, 'KL Tổng (Gross)'] = gross_q
+                        updated_df.at[idx, 'Thành tiền'] = round(gross_q * master_item['unit_cost'], 0)
+                        match_count += 1
                 
                 updated_df['Mục chiết tính (I -> VII)'] = updated_df.apply(clean_section_row, axis=1)
                 st.session_state[state_key] = updated_df
-                st.success(f"✅ Đã chuẩn hóa đúng quy chuẩn khối lượng cho {match_count} cấu kiện!")
+                st.success(f"✅ Đã đồng bộ giá chuẩn xác cho {match_count} cấu kiện!")
                 st.rerun()
 
         with c_tool2:
@@ -1139,7 +1146,6 @@ with tab2:
                         unit, net_q, w_pct, waste_q, gross_q, u_cost, amt, meaning, formula
                     ))
 
-                # Tính lại giá với hệ số mềm (Rule 11 & 15) khi lưu tay
                 total_overhead_pct_db = overhead_rate + pm_fee_rate + dlp_rate + consumables_rate
                 new_overhead = new_total_direct * (total_overhead_pct_db / 100.0)
                 new_tender = (new_total_direct + new_overhead) * (1 + profit_rate / 100.0)

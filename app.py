@@ -537,7 +537,7 @@ with tab1:
 
                         if benchmark_context: prompt += f"\nTHAM CHIẾU HỒ SƠ CHUẨN ĐÃ DUYỆT:\n{benchmark_context}"
 
-                        MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-3.1-pro']
+                        MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-3.5-flash-lite']
                         response = None
                         for current_model in MODELS_TO_TRY:
                             for attempt in range(3):
